@@ -1,23 +1,69 @@
 #!/usr/bin/env python3
 """
 tests/browser.test.py — 浏览器端集成测试（CDP 真实驱动 Chrome）
-用法: python3 tests/browser.test.py [--port 8746] [--keep]
+
+用法:
+  python3 tests/browser.test.py [--port 8746] [--chrome <路径>]
+
+退出码:
+  0 = 全部通过
+  1 = 有测试失败
+  2 = 未执行（找不到可用的 Chrome / 无法启动浏览器）
+
+⚠ 若浏览器不可用，本脚本【必须】以退出码 2 结束并明确报告"未执行"，
+   绝不允许把"没跑"报告成"通过"。
 """
 import base64, json, os, subprocess, sys, time, urllib.request, shutil
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_p = 8746
-if '--port' in sys.argv:
-    try: _p = int(sys.argv[sys.argv.index('--port') + 1])
-    except (IndexError, ValueError): _p = 8746
-PORT_HTTP = _p
-PORT_CDP = 9360 + (PORT_HTTP % 17)
 
-sys.path.insert(0, os.path.join(ROOT, 'tmp'))
+
+def _arg(flag, default=None):
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return default
+
+
+PORT_HTTP = int(_arg('--port', '8746') or 8746)
+PORT_CDP = 9360 + (PORT_HTTP % 17)
+CHROME = _arg('--chrome') or os.environ.get('CHROME_PATH')
+
 os.chdir(ROOT)
 
-# 启动静态服务器
+# ---------- 定位 Chrome ----------
+# 若显式指定了 --chrome / CHROME_PATH，则【只】尝试该路径：
+# 指定错误时必须报错退出，不能静默回退到别的浏览器（否则"测试的是哪个浏览器"无法确定）。
+if CHROME:
+    if os.path.exists(CHROME):
+        chrome_bin = CHROME
+    else:
+        print(f"未执行: 指定的浏览器不存在: {CHROME}")
+        sys.exit(2)
+else:
+    CANDIDATES = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        shutil.which("google-chrome") or "",
+        shutil.which("chromium") or "",
+    ]
+    chrome_bin = next((c for c in CANDIDATES if c and os.path.exists(c)), None)
+    if not chrome_bin:
+        print("未执行: 找不到 Chrome/Chromium 可执行文件。")
+        print("  可用 --chrome <路径> 或环境变量 CHROME_PATH 指定。")
+        print("  尝试过的路径:")
+        for c in CANDIDATES:
+            if c: print("    -", c)
+        sys.exit(2)
+print(f"使用浏览器: {chrome_bin}")
+
+# ---------- 启动静态服务器 ----------
 srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(PORT_HTTP),
                         '--bind', '127.0.0.1', '--directory', os.path.join(ROOT, 'outputs')],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -26,7 +72,7 @@ time.sleep(1.5)
 UD = "/tmp/chrome-browser-test"
 shutil.rmtree(UD, ignore_errors=True)
 proc = subprocess.Popen([
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    chrome_bin,
     "--headless=new", f"--remote-debugging-port={PORT_CDP}", f"--user-data-dir={UD}",
     "--use-gl=angle", "--enable-unsafe-swiftshader", "--window-size=1600,900",
     "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -87,6 +133,11 @@ try:
         pump(0.4)
         if ev("!!window.__READY__") is True: ready = True; break
     load_t = time.time() - t0
+    if not ready:
+        print("未执行: 浏览器已启动但页面未能就绪（window.__READY__ 未置位）。")
+        print("  收集到的错误:")
+        for l in logs[:10]: print("   ", l)
+        sys.exit(2)
 
     PASS = []; FAIL = []
     def check(name, cond, detail=""):
@@ -177,25 +228,53 @@ try:
               "descent":"DESCENT","roll":"ROLL","cushion":"AIRSAC","landed":"TOUCHDOWN"}[kinPhase]
     check("HUD PHASE 与运动学一致", hudPhase.startswith(expect), f"{hudPhase} vs {kinPhase}")
 
-    # 键盘
-    ev("__RD__.seek(0)"); pump(0.2)
-    send("Input.dispatchKeyEvent", {"type":"keyDown","key":" ","code":"Space","windowsVirtualKeyCode":32}, sess)
-    send("Input.dispatchKeyEvent", {"type":"keyUp","key":" ","code":"Space","windowsVirtualKeyCode":32}, sess)
-    pump(0.3)
-    check("SPACE 切换播放", ev("__RD__.playing") is False or ev("__RD__.playing") is True)
-    send("Input.dispatchKeyEvent", {"type":"keyDown","key":"c","code":"KeyC","text":"c"}, sess)
-    send("Input.dispatchKeyEvent", {"type":"keyUp","key":"c","code":"KeyC"}, sess)
-    pump(0.3)
-    check("C 切换机位", ev("__RD__.viewIdx") == 1, str(ev("__RD__.viewIdx")))
-    send("Input.dispatchKeyEvent", {"type":"keyDown","key":"3","code":"Digit3","text":"3"}, sess)
-    send("Input.dispatchKeyEvent", {"type":"keyUp","key":"3","code":"Digit3"}, sess)
-    pump(0.3)
-    check("数字键切换机位", ev("__RD__.viewIdx") == 2, str(ev("__RD__.viewIdx")))
-    ev("__RD__.playing=false")
-    send("Input.dispatchKeyEvent", {"type":"keyDown","key":"r","code":"KeyR","text":"r"}, sess)
-    send("Input.dispatchKeyEvent", {"type":"keyUp","key":"r","code":"KeyR"}, sess)
-    pump(0.4)
-    check("R 重置", ev("__RD__.t") == 0, str(ev("__RD__.t")))
+    # ---------- 键盘：必须验证状态【确实改变】，不接受恒真断言 ----------
+    def key(code, key_name, vk=None, text=None):
+        d = {"type": "keyDown", "code": code, "key": key_name}
+        if vk is not None: d["windowsVirtualKeyCode"] = vk
+        if text is not None: d["text"] = text
+        send("Input.dispatchKeyEvent", d, sess)
+        send("Input.dispatchKeyEvent", {"type": "keyUp", "code": code, "key": key_name}, sess)
+        pump(0.35)
+
+    # SPACE：必须翻转 playing 状态
+    ev("__RD__.playing=false"); pump(0.2)
+    before = ev("__RD__.playing")
+    key("Space", " ", vk=32)
+    after = ev("__RD__.playing")
+    check("SPACE 翻转播放状态", isinstance(after, bool) and after != before,
+          f"before={before} after={after}")
+    key("Space", " ", vk=32)
+    check("SPACE 再次翻转可恢复", ev("__RD__.playing") == before,
+          f"期望回到 {before}，实得 {ev('__RD__.playing')}")
+
+    # C：机位索引必须 +1（模 4）
+    ev("__RD__.setView(0)"); pump(0.2)
+    v0 = ev("__RD__.viewIdx")
+    key("KeyC", "c", text="c")
+    v1 = ev("__RD__.viewIdx")
+    check("C 切换机位（+1 循环）", v1 == (v0 + 1) % 4, f"{v0} → {v1}")
+
+    # 数字键：直接选定机位
+    for n, expect in [(1, 0), (3, 2), (4, 3), (2, 1)]:
+        key(f"Digit{n}", str(n), text=str(n))
+        got = ev("__RD__.viewIdx")
+        check(f"数字键 {n} 选定机位", got == expect, f"期望 {expect}，实得 {got}")
+
+    # R：必须把时间归零
+    ev("__RD__.seek(4.0); __RD__.playing=false"); pump(0.3)
+    check("重置前时间非零", ev("__RD__.t") > 1.0, str(ev("__RD__.t")))
+    key("KeyR", "r", text="r")
+    check("R 归零时间", ev("__RD__.t") == 0, str(ev("__RD__.t")))
+
+    # 键盘不应在输入框聚焦时劫持
+    ev("__RD__.playing=false"); pump(0.2)
+    ev("""(()=>{const i=document.createElement('input');i.id='__probe__';
+       document.body.appendChild(i);i.focus();})()""")
+    key("Space", " ", vk=32)
+    check("输入框聚焦时 SPACE 不劫持", ev("__RD__.playing") is False,
+          f"playing={ev('__RD__.playing')}")
+    ev("document.getElementById('__probe__').remove()")
 
     # 车辆姿态与运动学一致
     print("\n[车辆姿态与坐标系]")
