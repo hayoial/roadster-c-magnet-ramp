@@ -4,28 +4,43 @@ Tesla Roadster 在得州 SpaceX 测试场完成 C 形磁吸坡道倒挂测试的
 
 Three.js 负责场景与物理表现，SVG 负责遥测 HUD 与坡道侧视示意图。
 
+![阶段时间轴](docs/timeline.jpg)
+
 ## 运行
 
 ```bash
-./fetch-deps.sh          # 拉取 three.js 及 postprocessing 依赖
-python3 -m http.server 8000 --directory outputs
-# 打开 http://127.0.0.1:8000
+./fetch-deps.sh                       # 拉取 three.js 0.160.0 + postprocessing 依赖
+npm run serve                         # http://127.0.0.1:8000
 ```
 
 需要用 HTTP 访问（ES module + importmap 不能走 `file://`）。
 
-## 时间轴（12.75s）
+## 测试
 
-| 阶段 | 关键量 |
-|------|--------|
-| APPROACH | 地面助跑 14→20 m/s |
-| CLIMB | 沿 C 形坡道冲刺，至 15m 高 |
-| MAG CAPTURE | 磁吸等减速捕获，负 g 过载 −1.3→−0.5 |
-| INVERTED HOLD | 车底吸附，180° 完全倒挂静止 1 秒 |
-| DESCENT | 车底反推冷气缓降 |
-| ROLL RECOVERY | 4 次侧向冷气脉冲驱动 0→180° 横滚回正 |
-| AIRSAC CUSHION | 底部高压白雾缓冲，峰值 2.37g |
-| TOUCHDOWN | 零速触地，避震压缩回弹 |
+```bash
+npm test              # 运动学单元测试（纯 node，43 项）
+npm run test:browser  # 浏览器集成测试（CDP 驱动 Chrome，32 项）
+npm run test:all      # 全部
+```
+
+| 测试 | 文件 | 覆盖内容 |
+|------|------|---------|
+| 运动学 | `tests/kinematics.test.mjs` | 坡道几何、姿态基、助跑一致性、磁吸捕获精度、阶段连续性、横滚、着陆、采样确定性 |
+| 粒子 | `tests/particles.test.mjs` | 粒子状态独立性、槽位复用、生命周期、数值稳定性、帧率无关性、源码一致性 |
+| 浏览器 | `tests/browser.test.py` | 加载、粒子调试接口、播放/暂停/擦洗/重置/切机位、HUD 与运动学一致性、响应式、运行时错误 |
+
+## 时间轴（13.96s）
+
+| 阶段 | 时刻 | 关键量 |
+|------|------|--------|
+| APPROACH | 0.00–2.20s | 地面助跑 0→20 m/s，22m 距离，0.93g |
+| CLIMB | 2.20–3.23s | 沿 C 形坡道冲刺，磁吸吸起（车身抬升 0.195m） |
+| MAG CAPTURE | 3.23–6.07s | 等减速捕获，负 g 过载 −1.30→−0.47 |
+| INVERTED HOLD | 6.07–7.13s | 车底吸附，180° 完全倒挂静止 1 秒 |
+| DESCENT | 7.13–7.63s | 车底反推冷气缓降 |
+| ROLL RECOVERY | 7.63–10.74s | 4 次侧向冷气脉冲驱动 0→180° 横滚回正 |
+| AIRSAC CUSHION | 10.74–11.36s | 底部高压白雾缓冲，峰值 2.37g |
+| TOUCHDOWN | 11.36–13.96s | 零速触地（v < 1e-9），避震压缩回弹 |
 
 ## 交互
 
@@ -41,27 +56,66 @@ python3 -m http.server 8000 --directory outputs
 
 ```
 outputs/
-  index.html      主程序（场景 + 动画 + HUD）
-  motion.js       纯运动学核心，无渲染依赖，node 与浏览器共用
-  three.module.js / vendor/   第三方依赖（fetch-deps.sh 生成）
+  index.html        主程序（场景 + 动画 + HUD）
+  motion.js         运动学时间轴与采样（无渲染依赖）
+  ramp-geometry.js  坡道几何与车辆姿态基（渲染层与运动学层共用）
+  three.module.js   第三方依赖（fetch-deps.sh 生成）
+  vendor/addons/    postprocessing 依赖（fetch-deps.sh 生成）
+tests/
+  kinematics.test.mjs  运动学单元测试
+  particles.test.mjs   粒子系统测试
+  browser.test.py      浏览器集成测试
 ```
 
-`motion.js` 独立于渲染层，可直接在 node 中跑物理校验：
+## 坐标系约定
 
-```bash
-node -e "import('./outputs/motion.js').then(m => {
-  const T = m.buildTimeline();
-  console.log('总时长', T.TOTAL.toFixed(2), 's');
-})"
+这是本项目最容易出错的地方，定义在 `ramp-geometry.js` 并由测试断言。
+
+**世界坐标系**：右手系，Y 向上。C 形环心在 `(0, R)`，参数 `a ∈ [0, π]`。
+
+```
+a = 0    → (0, 0, 0)     地面入口，切向 +X，车身正立
+a = π/2  → (R, R, ·)     C 形右腰，切向 +Y，车身侧躺 90°
+a = π    → (0, 2R, ·)    顶点，切向 −X，车身完全倒置 180°
 ```
 
-## 关键设计
+**车辆模型局部轴**（由 `buildCar()` 的几何决定）：
 
-**坡道几何** — C 形环内侧轨道，环心 `(0, R)`，扭转 `z = ½ka²`。
-`rampUp(a) = (−sin a, cos a)` 恒指向环心，即车身顶面朝向。
-推到 `a = π` 时车顶朝下、车悬于轨道下方 0.6m，磁吸盘压住轨道底面。
+| 局部轴 | 含义 | 依据 |
+|--------|------|------|
+| +X | 车长轴，**车尾**方向 | 剖面 x ∈ [−2.05, 2.16]，车头在 −X |
+| +Y | 车顶方向 | 座舱玻璃罩在 +Y |
+| +Z | 车宽轴（车轮轴） | 车轮 `rotation.x = π/2` |
 
-**磁吸捕获** — 恒定减速度 `cMag = v²/2d`，保证恰好停在顶点且 g 曲线连续。
+**姿态基构造**：`makeCarBasis(fwd, up)` → `makeBasis(xAxis, up, zAxis)`，
+其中 `xAxis = −fwd`（模型 +X 指向车尾）、`zAxis = up × fwd`。
+校验：`det(xAxis, up, zAxis) = +1`（纯旋转），三向量两两正交且归一。
+
+> `zAxis` 若取 `fwd × up` 会得到 det = −1 的**镜像矩阵**，
+> three.js 会渲染出翻转的模型 —— 这是本项目修过的一个隐蔽缺陷。
+
+**高度基准**：
+
+| 量 | 值 | 含义 |
+|----|----|------|
+| `CAR.rideHeight` | 0.58 | 车身中心离地（轮胎接地）—— 地面/着陆阶段 |
+| `CAR.magContact` | 0.385 | 车身中心到磁吸盘贴合面 —— 坡道磁吸阶段 |
+
+两者相差 0.195m：磁吸时轮胎悬空（车被磁力吸住，不是压在轨道上）。
+入坡时用 `lift` 因子在 `a ∈ [0, 0.55]` 区间连续过渡，避免 0.195m 的位置跳变。
+
+## 关键实现
+
+**磁吸捕获** — 用解析速度剖面而非离散积分：
+
+```
+弧长域等减速  s(τ) = s₀ + v₀τ − ½cτ²,  v(τ) = v₀ − cτ
+c = v₀²/(2·d_cap)  ⇒  停止时间 τ_cap = v₀/c
+每步由弧长反解参数 a（二分）
+```
+
+这样停车位置由解析式保证，与步长 `dt` 无关。
+（早期版本用参数域半隐式欧拉，离散误差使车停在 179.877° 而非 180°。）
 
 **气垫缓冲** — 按剩余高度逐帧反解所需减速度：
 
@@ -69,13 +123,25 @@ node -e "import('./outputs/motion.js').then(m => {
 aAcc = -(vy * vy) / (2 * Math.max(0.12, h))
 ```
 
-无需预设减速曲线，天然收敛到零速触地。
+无需预设减速曲线，天然收敛到零速触地（实测 v < 1e-9 m/s）。
 
-## 渲染注意事项
+**反推喷口** — 推力随速度上升，净下压加速度随之衰减：
 
-- 粒子用 `InstancedMesh` billboard 而非 `THREE.Points` —— SwiftShader 的点精灵尺寸上限会让大尺寸粒子整批被丢弃
-- 相机偏移定义在车体局部坐标系（`carRight` / `carUp` / `carFwd`），固定世界坐标在车倒挂时会钻进坡道
-- 自定义 lathe 剖面的三角面绕序决定法线朝向，绕序写反会导致整车发黑
+```js
+net = A0 * (1 - fall * min(vy / vRef, 1))
+```
+
+**粒子系统** — 用 `InstancedMesh` billboard 而非 `THREE.Points`：
+SwiftShader 的点精灵尺寸上限会把大尺寸粒子整批丢弃。
+每个粒子持有独立位置（`px/py/pz`），不使用共享向量。
+透明度由颜色亮度承载（`instanceColor` 在 three 中无 alpha 通道），死亡粒子缩放为 0。
+
+## 已知限制
+
+- 物理为**艺术化近似**，非真实工程仿真：磁吸力、气垫反解、脉冲横滚都是为叙事设计的模型。
+- 坡道扭转 `z = ½ka²` 使切向带 z 分量，因此"切向朝 ±X"只在 XY 平面意义上成立。
+- 无音频。
+- 移动端竖屏可用但未做专门构图优化。
 
 ## License
 

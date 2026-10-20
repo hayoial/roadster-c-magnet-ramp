@@ -1,0 +1,15 @@
+{
+  "name": "roadster-c-magnet-ramp",
+  "version": "1.1.0",
+  "description": "Tesla Roadster @ Texas SpaceX test site — C-magnet ramp inverted-hold animation (Three.js + SVG)",
+  "type": "module",
+  "scripts": {
+    "deps": "./fetch-deps.sh",
+    "test": "node tests/kinematics.test.mjs",
+    "test:browser": "python3 tests/browser.test.py",
+    "test:all": "node tests/kinematics.test.mjs && python3 tests/browser.test.py",
+    "serve": "python3 -m http.server 8000 --directory outputs"
+  },
+  "license": "MIT",
+  "private": true
+}
