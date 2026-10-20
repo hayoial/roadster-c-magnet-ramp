@@ -63,13 +63,31 @@ else:
         sys.exit(2)
 print(f"使用浏览器: {chrome_bin}")
 
+# ---------- 端口可用性预检 ----------
+def _port_free(p):
+    import socket
+    sk = socket.socket()
+    sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sk.bind(('127.0.0.1', p)); return True
+    except OSError:
+        return False
+    finally:
+        sk.close()
+
+if not _port_free(PORT_HTTP):
+    print(f"未执行: 端口 {PORT_HTTP} 已被占用，请用 --port 指定其他端口。")
+    sys.exit(2)
+
 # ---------- 启动静态服务器 ----------
 srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(PORT_HTTP),
                         '--bind', '127.0.0.1', '--directory', os.path.join(ROOT, 'outputs')],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1.5)
 
-UD = "/tmp/chrome-browser-test"
+# user-data-dir 必须唯一：多个 Chrome 实例共用同一目录会因
+# SingletonLock 竞争而导致启动失败或行为异常。
+UD = f"/tmp/chrome-browser-test-{PORT_HTTP}-{os.getpid()}"
 shutil.rmtree(UD, ignore_errors=True)
 proc = subprocess.Popen([
     chrome_bin,
@@ -346,3 +364,4 @@ finally:
     except Exception: pass
     proc.terminate()
     srv.terminate()
+    shutil.rmtree(UD, ignore_errors=True)
