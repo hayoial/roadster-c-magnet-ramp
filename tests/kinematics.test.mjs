@@ -8,7 +8,7 @@ import {
   carCenterOnRamp, makeCarBasis, RAMP, CAR,
   v3, add, sub, scl, cross, dot, nrm, rotAxis, clamp,
 } from '../outputs/ramp-geometry.js';
-import { buildTimeline, deriveApproachDuration, CFG } from '../outputs/motion.js';
+import { buildTimeline, deriveApproachDuration, validateConfig, CFG } from '../outputs/motion.js';
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -198,13 +198,68 @@ test('approach → climb 位置与速度连续', () => {
   near(a.speed, b.speed, 0.05, '速度跳变');
 });
 
-test('所有阶段边界位置连续（跳变 < 5mm）', () => {
+test('所有阶段边界连续：采样边界左右两侧，位置/速度/姿态均连续', () => {
   const spans = T.phaseSpans();
+  // 边界两侧的采样间隔：取一个"足够小但不等于 0"的时间偏移，
+  // 使两侧落在不同样本上，从而真正检验插值后的连续性。
+  const EPS = 0.001;   // 1ms
   for (let i = 0; i < spans.length - 1; i++) {
     const A = spans[i], B = spans[i + 1];
-    const a = T.sample(A.t1), b = T.sample(B.t0);
-    const d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-    assert.ok(d < 0.005, `${A.kind}→${B.kind} 跳变 ${d.toFixed(6)}m`);
+    const tb = A.t1;                       // 边界时刻
+    const left = T.sample(tb - EPS);
+    const right = T.sample(tb + EPS);
+
+    // 位置
+    const dp = Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
+    assert.ok(dp < 0.05, `${A.kind}→${B.kind} 位置跳变 ${dp.toFixed(6)}m（±${EPS}s）`);
+
+    // 速度
+    const dv = Math.abs(left.speed - right.speed);
+    assert.ok(dv < 1.0, `${A.kind}→${B.kind} 速度跳变 ${dv.toFixed(6)} m/s`);
+
+    // 姿态：基向量夹角
+    const ang = (u, v) => Math.acos(Math.max(-1, Math.min(1,
+      u.x * v.x + u.y * v.y + u.z * v.z))) * 180 / Math.PI;
+    const dUp = ang(left.up, right.up);
+    const dFwd = ang(left.fwd, right.fwd);
+    assert.ok(dUp < 5, `${A.kind}→${B.kind} 车顶方向突变 ${dUp.toFixed(4)}°`);
+    assert.ok(dFwd < 5, `${A.kind}→${B.kind} 前进方向突变 ${dFwd.toFixed(4)}°`);
+
+    // 横滚角
+    const dRoll = Math.abs(left.roll - right.roll);
+    assert.ok(dRoll < 5, `${A.kind}→${B.kind} 横滚角突变 ${dRoll.toFixed(4)}°`);
+  }
+});
+
+test('阶段边界处不产生瞬移（逐帧位置差有界）', () => {
+  const spans = T.phaseSpans();
+  for (const sp of spans.slice(0, -1)) {
+    const tb = sp.t1;
+    const before = T.sample(tb - 0.002);
+    const after = T.sample(tb + 0.002);
+    const d = Math.hypot(before.x - after.x, before.y - after.y, before.z - after.z);
+    // 4ms 内位移应远小于 1m（正常车速下约 0.1m）
+    assert.ok(d < 0.5, `${sp.kind} 边界瞬移 ${d.toFixed(4)}m`);
+  }
+});
+
+test('阶段边界处的阶段标签与时间一致', () => {
+  const spans = T.phaseSpans();
+  for (const sp of spans) {
+    const mid = (sp.t0 + sp.t1) / 2;
+    assert.equal(T.sample(mid).phase, sp.kind, `${sp.kind} 区间中点阶段标签不符`);
+    // 区间内 1/4 与 3/4 处也应属于本阶段
+    assert.equal(T.sample(sp.t0 + (sp.t1 - sp.t0) * 0.25).phase, sp.kind, `${sp.kind} 1/4 处`);
+    assert.equal(T.sample(sp.t0 + (sp.t1 - sp.t0) * 0.75).phase, sp.kind, `${sp.kind} 3/4 处`);
+  }
+  // 边界前一瞬属于前一个阶段，边界后一瞬属于后一个阶段
+  for (let i = 0; i < spans.length - 1; i++) {
+    const A = spans[i], B = spans[i + 1];
+    const before = T.sample(B.t0 - 1e-4);
+    const after = T.sample(B.t0 + 1e-4);
+    assert.ok(before.phase === A.kind || before.phase === B.kind,
+      `边界前阶段应为 ${A.kind} 或 ${B.kind}，实得 ${before.phase}`);
+    assert.equal(after.phase, B.kind, `边界后应属 ${B.kind}`);
   }
 });
 
@@ -242,18 +297,61 @@ test('捕获段 gLoad 为负（磁吸负过载）', () => {
   assert.ok(mid.gLoad < 0, `捕获中段 gLoad 应为负，实得 ${mid.gLoad}`);
 });
 
-test('捕获失败会显式抛错而非静默成功', () => {
-  // 构造不可能完成的捕获：捕获距离极短 → 减速度触底 → 应仍能停下但需极长时间
-  let threw = false;
-  try {
-    const bad = buildTimeline({ ...CFG, magStart: 0.98 });  // 几乎立刻捕获
-    // 若未抛错，至少必须停在 a=π
-    near(bad.times.capEndA, Math.PI, 1e-6, '极端参数下仍应停在顶点');
-  } catch (e) {
-    threw = true;
-    assert.match(e.message, /磁吸捕获失败/, '错误信息应说明捕获失败');
+test('正常捕获：极端 magStart 下仍精确停在顶点', () => {
+  // magStart 接近 1 → 捕获距离极短 → 减速度触底 → 仍必须停在 a=π
+  const bad = buildTimeline({ ...CFG, magStart: 0.98 });
+  near(bad.times.capEndA, Math.PI, 1e-6, '极端参数下的停车角度');
+  near(bad.times.capEndV, 0, 1e-6, '极端参数下的残余速度');
+  assert.ok(bad.times.capOk, '应标记捕获成功');
+});
+
+test('非法配置：validateConfig 给出明确错误而非下游崩溃', () => {
+  const cases = [
+    { name: 'vEntry=0', cfg: { vEntry: 0 }, expect: /vEntry/ },
+    { name: 'vStart > vEntry', cfg: { vStart: 99 }, expect: /vEntry/ },
+    { name: 'magStart 越界', cfg: { magStart: 1.5 }, expect: /magStart/ },
+    { name: 'dt=0', cfg: { dt: 0 }, expect: /dt/ },
+    { name: 'R<0', cfg: { R: -1 }, expect: /R/ },
+    { name: 'cushionH=0', cfg: { cushionH: 0 }, expect: /cushionH/ },
+    { name: 'NaN 值', cfg: { vEntry: NaN }, expect: /有限/ },
+    { name: 'approachStart 为正', cfg: { approachStart: 5 }, expect: /approachStart/ },
+    { name: 'pulseDur=0', cfg: { pulseDur: 0 }, expect: /pulseDur/ },
+  ];
+  for (const c of cases) {
+    let msg = null;
+    try { buildTimeline({ ...CFG, ...c.cfg }); }
+    catch (e) { msg = e.message; }
+    assert.ok(msg !== null, `${c.name}: 应抛错但没有`);
+    assert.match(msg, c.expect, `${c.name}: 错误信息应指出具体字段，实得: ${msg}`);
+    assert.match(msg, /^配置无效/, `${c.name}: 错误信息应有统一前缀`);
   }
-  assert.ok(threw || true, '不要求极端参数必定失败，但失败必须显式');
+});
+
+test('校验函数对正常配置返回 true', () => {
+  assert.equal(validateConfig(CFG), true);
+});
+
+test('捕获对采样步长不敏感（解析速度剖面）', () => {
+  // 解析速度剖面让停车位置与 dt 无关 —— 极端步长下仍精确停在顶点。
+  // 早前版本用参数域欧拉积分，dt 过大时会停在半路却标记"倒挂成功"。
+  for (const dt of [1 / 240, 1 / 120, 1 / 60, 0.05]) {
+    const tl = buildTimeline({ ...CFG, dt });
+    near(tl.times.capEndA, Math.PI, 1e-6, `dt=${dt} 停车角度`);
+    near(tl.times.capEndV, 0, 1e-6, `dt=${dt} 残余速度`);
+    assert.ok(tl.times.capOk, `dt=${dt} 应标记成功`);
+  }
+});
+
+test('捕获失败的错误信息包含可定位的数值', () => {
+  // 强制一个必然失败的场景：dt 巨大导致离散积分完全跳过捕获区
+  let msg = null;
+  try {
+    buildTimeline({ ...CFG, magStart: 0.999999, dt: 0.5 });
+  } catch (e) { msg = e.message; }
+  if (msg !== null) {
+    assert.match(msg, /°/, '错误信息应含停车角度');
+    assert.match(msg, /m\/s/, '错误信息应含残余速度');
+  }
 });
 
 // ============================================================

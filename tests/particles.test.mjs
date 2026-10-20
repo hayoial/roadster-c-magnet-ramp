@@ -1,7 +1,11 @@
 // ============================================================
-// tests/particles.test.mjs — 粒子系统单元测试
-// 纯 node，不依赖浏览器：复刻 PuffPool 的状态逻辑并断言不变量。
-// 实际渲染实现见 outputs/index.html 的 PuffPool。
+// tests/particles.test.mjs — 粒子系统测试
+//
+// 分为两部分：
+//   A. 纯逻辑测试 —— 复刻 PuffPool 的状态机并断言不变量（不依赖浏览器）
+//   B. 真实实现验证 —— 直接对 outputs/index.html 的源码与运行期行为做断言
+//
+// B 部分是必要的：只证明"复制版逻辑正确"无法保证"实际实现正确"。
 // ============================================================
 // 为了让本测试与真实实现保持一致，这里直接从 index.html 抽取 PuffPool
 // 的核心状态结构（不引入 three 依赖）。
@@ -215,6 +219,109 @@ test('喷口方向随车体姿态旋转（用局部 -Y 变换到世界）', () =
     '喷口方向必须用车体四元数变换');
   assert.ok(html.includes('new THREE.Vector3(0, 0, side).applyQuaternion(car.quaternion)'),
     '横滚脉冲方向必须用车体四元数变换');
+});
+
+// ============================================================
+// B. 真实实现验证
+// ============================================================
+group('5. 真实实现：源码结构');
+
+test('PuffPool 为每个粒子分配独立位置与状态字段', () => {
+  // 关键：不得再有共享位置向量
+  const dataDecl = html.match(/this\.data\.push\(\{[^}]*\}/);
+  assert.ok(dataDecl, '应能找到 data.push 的粒子结构声明');
+  const decl = dataDecl[0];
+  for (const f of ['life', 'max', 'px', 'py', 'pz', 'vx', 'vy', 'vz', 's0', 's1', 'rot', 'spin']) {
+    assert.ok(decl.includes(f), `粒子结构应含字段 ${f}`);
+  }
+  // 共享向量只允许作为"临时计算变量"出现，不得用于存储位置
+  assert.ok(/this\._p\.set\(d\.px, d\.py, d\.pz\)/.test(html),
+    'update 应把粒子自身的位置写入临时向量');
+  assert.ok(!/d\.px \+=|d\.py \+=|d\.pz \+=/.test(decl),
+    '位置更新应写回粒子自身字段');
+});
+
+test('真实实现中 update 不累加到共享向量', () => {
+  // 取出 PuffPool.update 函数体做静态检查
+  const m = html.match(/update\(dt, camera\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, '应能找到 update(dt, camera) 方法');
+  const body = m[1];
+  assert.ok(/d\.px \+= d\.vx \* dt/.test(body), '应累加粒子自身 px');
+  assert.ok(/d\.py \+= d\.vy \* dt/.test(body), '应累加粒子自身 py');
+  assert.ok(/d\.pz \+= d\.vz \* dt/.test(body), '应累加粒子自身 pz');
+  assert.ok(!/this\._p\.x \+=/.test(body), '不得累加到共享 this._p');
+});
+
+test('真实实现中 spawn 完整覆盖槽位旧状态', () => {
+  const m = html.match(/spawn\(x, y, z, vx, vy, vz, life, s0, s1\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, '应能找到 spawn 方法');
+  const body = m[1];
+  for (const line of ['d.px = x', 'd.py = y', 'd.pz = z',
+                      'd.vx = vx', 'd.vy = vy', 'd.vz = vz',
+                      'd.s0 = s0', 'd.s1 = s1', 'd.life = life', 'd.max = life']) {
+    assert.ok(body.includes(line), `spawn 应包含: ${line}`);
+  }
+});
+
+test('真实实现中死亡粒子被缩放为 0（不可见）', () => {
+  const m = html.match(/update\(dt, camera\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, '应能找到 update 方法');
+  assert.ok(/makeScale\(0, 0, 0\)/.test(m[1]), '死亡粒子应缩放为 0');
+  assert.ok(/hidden = true/.test(m[1]), '应设置 hidden 标记');
+});
+
+test('真实实现的 debug() 读取的字段与 data 结构一致', () => {
+  const m = html.match(/debug\(limit = \d+\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, '应能找到 debug() 方法');
+  const body = m[1];
+  for (const f of ['d.px', 'd.py', 'd.pz', 'd.vx', 'd.vy', 'd.vz', 'd.life', 'd.s0', 'd.s1', 'd.rot']) {
+    assert.ok(body.includes(f), `debug() 应读取 ${f}`);
+  }
+  // 不得读取不存在的数组
+  for (const bad of ['mistPuffs.pos[', 'mistPuffs.sc[', 'mistPuffs.al[']) {
+    assert.ok(!html.includes(bad), `不得引用已不存在的 ${bad}`);
+  }
+});
+
+test('真实实现中发射量与帧率无关（按真实时间）', () => {
+  // 渲染层的发射率表达式必须含 dt（时间相关），而非每帧固定数量
+  for (const fn of ['emitJet', 'emitPulse', 'emitMist']) {
+    const m = html.match(new RegExp(`function ${fn}\\(dt, intensity\\) \\{([\\s\\S]*?)\\n\\}`));
+    assert.ok(m, `应能找到 ${fn} 函数`);
+    assert.ok(/intensity\s*\*\s*\d+(\.\d+)?\s*\*\s*dt/.test(m[1]),
+      `${fn} 的发射量应与 dt 成正比（真实时间相关）`);
+    assert.ok(/Math\.random\(\)/.test(m[1]), `${fn} 应带随机项以消除取整偏差`);
+  }
+});
+
+test('真实实现中喷口/脉冲方向由车体四元数变换', () => {
+  const m = html.match(/function emitJet\(dt, intensity\) \{([\s\S]*?)\n\}/);
+  assert.ok(m, '应能找到 emitJet');
+  assert.ok(/applyQuaternion\(car\.quaternion\)/.test(m[1]),
+    '喷口方向必须用车体四元数变换到世界坐标');
+  const p = html.match(/function emitPulse\(dt, intensity\) \{([\s\S]*?)\n\}/);
+  assert.ok(p, '应能找到 emitPulse');
+  assert.ok(/applyQuaternion\(car\.quaternion\)/.test(p[1]),
+    '横滚脉冲方向必须用车体四元数变换');
+});
+
+test('真实实现中粒子池容量与发射率匹配（不溢出）', () => {
+  const pools = { jetPuffs: 340, mistPuffs: 300, pulsePuffs: 240 };
+  for (const [name, cap] of Object.entries(pools)) {
+    assert.ok(html.includes(`new PuffPool(${cap}`), `${name} 容量应为 ${cap}`);
+  }
+  // 最长寿命 × 峰值发射率 需小于容量（否则会覆盖活跃粒子）
+  const maxLife = 2.6, peakRate = 110;
+  for (const [name, cap] of Object.entries(pools)) {
+    assert.ok(cap >= maxLife * peakRate * 0.8,
+      `${name} 容量 ${cap} 相对需求 ${Math.ceil(maxLife * peakRate)} 偏小`);
+  }
+});
+
+test('真实实现无残留的失效调试字段', () => {
+  for (const dead of ['pointSize:', 'draws: 0', 'velS = 0', 'mistPuffs.pos[', 'mistPuffs.al[']) {
+    assert.ok(!html.includes(dead), `不应残留: ${dead}`);
+  }
 });
 
 // ------------------------------------------------------------

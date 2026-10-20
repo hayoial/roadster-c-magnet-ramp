@@ -12,11 +12,25 @@
 //     a = π    → (0, 2R, ·)     顶点，切向 −X，车身完全倒置 180°
 //   横向扭转 z = ½·k·a²，让脱轨后产生侧向漂移
 //
-// 关键约定：
-//   rampUp(a) = 指向环心的法向 = 车身【顶面】朝向
-//   → a=π 时 rampUp = (0,−1,0)，车顶朝下，车悬于轨道下方倒挂
-//   车身中心 = rampPoint(a) + rampUp(a)·halfCar
-//   车身底面 = rampPoint(a) + rampUp(a)·(halfCar − carHeight/2)
+// 【各量的定义 —— 单一事实源】
+//
+//   rampPoint(a)      轨道【车行面】。车辆实际压住的那张曲面。
+//                    这是整个系统唯一的轨道位置基准。
+//
+//   rampUp(a)         指向环心的法向 = 车身【顶面】方向 = 车身"上"方向。
+//                    a=0 → (0,1,0) 正立；a=π → (0,−1,0) 完全倒挂。
+//
+//   rampSurface(a,T)  轨道【背面】 = rampPoint − rampUp·T
+//                    轨道是块有厚度的实体：车行面在 rampPoint，
+//                    实体向【背离环心】一侧延伸 T（即 −rampUp 方向）。
+//                    ⚠ 早前版本把 rampSurface 当作车行面，导致
+//                      接触面与渲染路面恒有 0.55m 间隙（见 tests 几何接触测试）。
+//
+//   车身中心(磁吸)    = rampPoint(a) + rampUp(a)·magContact
+//   磁吸接触面        = 车身中心 − rampUp(a)·magContact = rampPoint(a)  ✓ 零间隙
+//
+//   CAR.magContact    车身中心 → 磁吸盘贴合面的距离（磁吸时唯一使用的基准）
+//   CAR.rideHeight   车身中心 → 轮胎最低点的距离（仅地面/着陆阶段使用）
 // ============================================================
 
 /** 车辆几何常量（与渲染层 buildCar 保持一致） */
@@ -47,20 +61,53 @@ export function rampPoint(a, R = RAMP.R, k = RAMP.k) {
 }
 
 /**
- * 车行面（车辆实际压住的那一面轨道）。
+ * 轨道【背面】—— 轨道实体向背离环心一侧延伸的表面。
  *
- * 关键几何：车沿环的【内侧】行驶，rampUp 指向环心 = 车身顶面朝向，
- * 因此车底朝【背离环心】的方向。车辆压住的是环的【外缘背面】。
- *   a=0   → 路面在环心下方 → 车辆正立在地面上
- *   a=π/2 → 路面在环心右侧 → 车辆侧躺
- *   a=π   → 路面在环心上方 → 车辆完全倒挂，车底朝上压住路面
+ * 轨道是一块有厚度的结构：
+ *   车行面（车压住的那面） = rampPoint(a)
+ *   实体向 −rampUp（背离环心）方向延伸 thickness
  *
- * offset 为轨道半厚（路面相对基准环点向背离环心方向的偏移）。
+ * 腹板、加劲肋、支撑柱都挂在这一侧；车行面网格直接用 rampPoint。
+ *
+ * ⚠ 不要把本函数当作车行面使用 —— 那样会让车辆的磁吸接触面
+ *   与渲染出来的路面之间恒有 thickness 的间隙。
  */
-export function rampSurface(a, offset = 0, R = RAMP.R, k = RAMP.k) {
+export function rampSurface(a, thickness = 0, R = RAMP.R, k = RAMP.k) {
   const p = rampPoint(a, R, k);
   const u = rampUp(a);
-  return { x: p.x - u.x * offset, y: p.y - u.y * offset, z: p.z - u.z * offset };
+  return { x: p.x - u.x * thickness, y: p.y - u.y * thickness, z: p.z - u.z * thickness };
+}
+
+/**
+ * 车辆磁吸接触面 —— 车身中心沿 −up 方向 magContact 处。
+ * 等价于 rampPoint(a)（当车身中心 = rampPoint + up·magContact）。
+ */
+export function magContactPoint(a, R = RAMP.R, k = RAMP.k) {
+  return rampPoint(a, R, k);
+}
+
+/**
+ * 车身中心（磁吸贴合状态）。
+ */
+export function carCenterMag(a, R = RAMP.R, k = RAMP.k) {
+  const p = rampPoint(a, R, k);
+  const u = rampUp(a);
+  const h = CAR.magContact;
+  return { x: p.x + u.x * h, y: p.y + u.y * h, z: p.z + u.z * h };
+}
+
+/**
+ * 有符号接触间隙：磁吸接触面沿 up 方向相对轨道车行面的距离。
+ * 负值 = 接触面陷入轨道（穿模）；正值 = 悬空间隙。
+ * 正确的实现应恒为 0。
+ */
+export function contactGap(a, carCenter, R = RAMP.R, k = RAMP.k) {
+  const p = rampPoint(a, R, k);
+  const u = rampUp(a);
+  const cx = carCenter.x - u.x * CAR.magContact;
+  const cy = carCenter.y - u.y * CAR.magContact;
+  const cz = carCenter.z - u.z * CAR.magContact;
+  return (cx - p.x) * u.x + (cy - p.y) * u.y + (cz - p.z) * u.z;
 }
 
 /** 坡道单位切向（前进方向） */
@@ -101,7 +148,11 @@ export function rampArcLength(a1, a2, R = RAMP.R, k = RAMP.k, steps = 400) {
   return s;
 }
 
-/** 车身中心位置（贴轨面行驶时） */
+/**
+ * 车身中心位置（贴轨面行驶时）。
+ * halfCar = 车身中心沿 up 方向到轨道面的距离。
+ * 磁吸状态应传 CAR.magContact。
+ */
 export function carCenterOnRamp(a, halfCar, R = RAMP.R, k = RAMP.k) {
   const p = rampPoint(a, R, k);
   const u = rampUp(a);

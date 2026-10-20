@@ -157,7 +157,7 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.98;
+renderer.toneMappingExposure = 0.80;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.getElementById('stage').appendChild(renderer.domElement);
 
@@ -347,9 +347,8 @@ const RAMP_R = RG.RAMP.R, RAMP_K = RG.RAMP.k;
 const UP_Y = new THREE.Vector3(0, 1, 0);
 // 坡道几何【单一事实源】= ramp-geometry.js，与运动学层共用
 const rampPoint3 = (a) => { const p = RG.rampPoint(a); return new THREE.Vector3(p.x, p.y, p.z); };
-// 路面（车实际压住的那一面）= 基准环点向【背离环心】方向偏移
-const RAMP_T = 0.55;                                  // 轨道半厚
-const rampSurf3 = (a) => { const p = RG.rampSurface(a, RAMP_T); return new THREE.Vector3(p.x, p.y, p.z); };
+// 轨道实体厚度：车行面 = rampPoint，实体向【背离环心】一侧延伸 RAMP_T
+const RAMP_T = 0.55;
 const rampUp3    = (a) => { const u = RG.rampUp(a);    return new THREE.Vector3(u.x, u.y, u.z); };
 const rampTan3   = (a) => { const t = RG.rampTangent(a); return new THREE.Vector3(t.x, t.y, t.z); };
 const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3(s.x, s.y, s.z); };
@@ -359,7 +358,8 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
   const pos = [], idx = [], nor = [], uv = [];
   for (let i = 0; i <= NA; i++) {
     const a = Math.PI * i / NA;
-    const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+    // 车行面 = rampPoint（唯一基准，车辆的磁吸接触面正落在此面）
+    const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
     const r = rampSide3(a);
     for (let j = 0; j <= 6; j++) {
       const off = (j / 6 - 0.5) * SW;
@@ -390,13 +390,13 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
     const DZ = 5;                       // 桁架分段
     for (let i = 0; i <= NA; i++) {
       const a = Math.PI * i / NA;
-      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
       const r = rampSide3(a);
       const edge = p.clone().addScaledVector(r, sgn * SW / 2);
-      // 上弦杆（贴路面边）
+      // 上弦杆（贴车行面边缘）
       sp.push(edge.x, edge.y, edge.z); sn.push(r.x * sgn, r.y * sgn, r.z * sgn);
-      // 下弦杆（外扩+下移）
-      const low = edge.clone().addScaledVector(u, 0.55).addScaledVector(r, sgn * 0.26);
+      // 下弦杆（伸向轨道背面）
+      const low = edge.clone().addScaledVector(u, -RAMP_T).addScaledVector(r, sgn * 0.26);
       sp.push(low.x, low.y, low.z); sn.push(r.x * sgn, r.y * sgn, r.z * sgn);
     }
     for (let i = 0; i < NA; i++) { const a = i * 2; si.push(a, a + 2, a + 1, a + 2, a + 3, a + 1); }
@@ -418,9 +418,10 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
       const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
       for (let i = 0; i < nS; i++) {
         const a = Math.PI * i / (DZ * 2);
-        const p = rampSurf3(a), u = rampUp3(a), r = rampSide3(a);
+        const p = rampPoint3(a), u = rampUp3(a), r = rampSide3(a);
         const edge = p.clone().addScaledVector(r, sgn * SW / 2);
-        const low = edge.clone().addScaledVector(u, 0.55).addScaledVector(r, sgn * 0.26);
+        // 下弦杆伸向轨道【背面】(−u 方向)
+        const low = edge.clone().addScaledVector(u, -RAMP_T).addScaledVector(r, sgn * 0.26);
         const mid = edge.clone().lerp(low, 0.5);
         const len = edge.distanceTo(low);
         qq.setFromUnitVectors(UP_Y, low.clone().sub(edge).normalize());
@@ -439,9 +440,10 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
     const rp = [], rn = [], ri = [];
     for (let i = 0; i <= NA; i++) {
       const a = Math.PI * i / NA;
-      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
       const r = rampSide3(a);
       for (let j = 0; j <= 1; j++) {
+        // 导轨凸出车行面一点点（朝轨道实体侧 -u），车压在上面
         const pt = p.clone().addScaledVector(r, sgn * (0.44 + j * 0.14)).addScaledVector(u, -0.06);
         rp.push(pt.x, pt.y, pt.z); rn.push(u.x, u.y, u.z);
       }
@@ -485,7 +487,7 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
     const basis = new THREE.Matrix4();
     for (let i = 0; i < ribCount; i++) {
       const a = Math.PI * i / (ribCount - 1);
-      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a), r = rampSide3(a);
+      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a), r = rampSide3(a);
       const pos = p.clone().addScaledVector(u, -0.02);
       basis.makeBasis(r, u, tg);
       qq.setFromRotationMatrix(basis);
@@ -503,7 +505,7 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
     const colSpots = [];
     for (let i = 1; i < 12; i++) {
       const a = Math.PI * i / 12;
-      const p = rampSurf3(a);
+      const p = rampPoint3(a);
       const u = rampUp3(a);
       if (p.y < 1.6) continue;
       colSpots.push({ p, u });
@@ -518,7 +520,8 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
     const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
     for (let i = 0; i < n; i++) {
       const { p, u } = colSpots[i];
-      const bx = p.x - u.x * 2.2, bz = p.z - u.z * 2.2;
+      // 柱子立在轨道背面一侧（背离环心），从地面撑到轨道背面
+      const bx = p.x - u.x * (RAMP_T + 0.35), bz = p.z - u.z * (RAMP_T + 0.35);
       const h = p.y;
       // 柱
       qq.identity();
@@ -527,7 +530,7 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
       cols.setMatrixAt(i, mtx);
       // 斜撑
       const top = new THREE.Vector3(bx, h - 0.4, bz);
-      const edge = p.clone().addScaledVector(u, -0.15);
+      const edge = p.clone().addScaledVector(u, -RAMP_T);
       const dir = edge.clone().sub(top);
       qq.setFromUnitVectors(UP_Y, dir.clone().normalize());
       sc.set(1, dir.length(), 1);
@@ -851,13 +854,25 @@ const pulsePuffs = new PuffPool(240, softTex, 0xffffff, 1.0);
 // 机位：off 为相对车辆的偏移；lowY 为"倒挂时"的低位仰拍偏移
 // 机位：off 为【车体系】偏移（right / up / fwd 分量），look 为相对车辆的目标偏移。
 // lowY 为倒挂时 up 分量的替代值（倒挂时车顶朝下，需要换到另一侧仰拍）。
+// 机位：off 为【车体系】偏移
+//   off.x = 沿车体 right 轴（车身侧向）
+//   off.y = 沿车体 up 轴（车身"上"= 指向环心方向）
+//   off.z = 沿车体 fwd 轴（车头方向）
+//
+// 【为什么 up 分量要为正】
+//   车中心 = 路面 + up·magContact，即车位于路面的【up 侧】（朝环心）。
+//   相机也必须放在 up 侧，视线才会"越过车打到路面"——
+//   若相机在 -up 侧，路面会挡在车前面，只能看到路面看不到车。
+//   低 Y 值（lowY）为倒挂时的替代值：倒挂时 up 朝下，
+//   相机需要转到车底一侧（-up）才能看到磁吸盘。
 const VIEWS = [
-  // off.x = 侧向距离（车体 right 轴），off.y = 沿车体 up 的距离，off.z = 沿车体 fwd 的距离
-  // 侧向偏移要大、up 偏移要小 —— 避免俯视时被坡道板挡住车
-  { name: 'TRACKING', fov: 30, off: { x: 7.2, y: 0.9, z: 4.6 }, lowY: -1.6, look: { x: 0, y: 0, z: 0 } },
-  { name: 'LOW HERO', fov: 28, off: { x: -5.6, y: 0.5, z: 4.2 }, lowY: -1.0, look: { x: 0, y: 0, z: 0 } },
-  { name: 'CRANE', fov: 34, off: { x: -11, y: 4.5, z: 13 }, lowY: -3.5, look: { x: 0, y: 0, z: 0 } },
-  { name: 'WIDE', fov: 42, off: { x: -19, y: 3.5, z: 24 }, lowY: -3, look: { x: 0, y: 0, z: 0 } },
+  // 车位于轨道的【up 侧】（朝环心），坡道板在其 -up 侧。
+  // 因此相机必须放在 up 侧才能越过车看到坡面；
+  // 同时保持足够的侧向分量，避免正俯视时车身被磁吸盘遮住。
+  { name: 'TRACKING', fov: 30, off: { x: 10.0, y: 7.5, z: 5.0 }, lowY: -6.0, look: { x: 0, y: 0, z: 0 } },
+  { name: 'LOW HERO', fov: 28, off: { x: -8.0, y: 6.0, z: 4.5 }, lowY: -4.8, look: { x: 0, y: 0, z: 0 } },
+  { name: 'CRANE', fov: 36, off: { x: -14, y: 12, z: 19 }, lowY: -9, look: { x: 0, y: 0, z: 0 } },
+  { name: 'WIDE', fov: 44, off: { x: -24, y: 10, z: 32 }, lowY: -8, look: { x: 0, y: 0, z: 0 } },
 ];
 let viewIdx = 0;
 
@@ -1140,9 +1155,9 @@ function frame(now) {
 
   // 磁吸环发光
   const magOn = s.mag ? 1 : 0;
-  car.userData.magRing.material.opacity = 0.26 + magOn * 0.16 + Math.sin(nowS * 8) * 0.04 * magOn;
+  car.userData.magRing.material.opacity = 0.24 + magOn * 0.12 + Math.sin(nowS * 8) * 0.03 * magOn;
   magGlow.position.copy(car.position);
-  magGlow.intensity = magOn * 5 + (ph === 'capture' ? 5 : 0);
+  magGlow.intensity = magOn * 3 + (ph === 'capture' ? 3 : 0);
 
   // 车轮滚动
   if (ph === 'approach' || ph === 'climb') {

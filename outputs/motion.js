@@ -70,8 +70,41 @@ export function deriveApproachDuration(cfg = CFG) {
   return (Math.sqrt(v0 * v0 + 2 * acc * D) - v0) / acc;
 }
 
+/**
+ * 配置有效性检查 —— 非法配置必须在【开始积分前】就给出明确错误，
+ * 而不是让下游出现 "Cannot read properties of undefined" 之类的无信息异常。
+ */
+export function validateConfig(C) {
+  const req = (ok, msg) => { if (!ok) throw new Error(`配置无效: ${msg}`); };
+  const num = (v, name) => req(typeof v === 'number' && Number.isFinite(v), `${name} 必须是有限数值（实得 ${v}）`);
+  num(C.R, 'R'); num(C.k, 'k'); num(C.g, 'g'); num(C.dt, 'dt');
+  num(C.vEntry, 'vEntry'); num(C.vStart, 'vStart');
+  num(C.magStart, 'magStart'); num(C.holdTime, 'holdTime');
+  num(C.descentA0, 'descentA0'); num(C.descentFall, 'descentFall');
+  num(C.vRef, 'vRef'); num(C.rollDelay, 'rollDelay'); num(C.rollDur, 'rollDur');
+  num(C.cushionH, 'cushionH'); num(C.halfCar, 'halfCar'); num(C.magHalf, 'magHalf');
+  num(C.approachStart, 'approachStart'); num(C.vh, 'vh'); num(C.suspA, 'suspA');
+
+  req(C.R > 0, 'R 必须为正');
+  req(C.dt > 0, 'dt 必须为正');
+  req(C.vEntry > 0, 'vEntry 必须为正（入坡速度不能为 0）');
+  req(C.vStart >= 0, 'vStart 不能为负');
+  req(C.vEntry >= C.vStart, 'vEntry 必须 ≥ vStart');
+  req(C.approachStart < 0, 'approachStart 必须为负（入坡点在 x=0）');
+  req(C.magStart > 0 && C.magStart < 1, 'magStart 必须在 (0,1) 内');
+  req(C.holdTime >= 0, 'holdTime 不能为负');
+  req(C.rollDur > 0, 'rollDur 必须为正');
+  req(C.cushionH > 0, 'cushionH 必须为正');
+  req(C.halfCar > 0 && C.magHalf > 0, '车身高度基准必须为正');
+  req(C.vRef > 0, 'vRef 必须为正');
+  req(Array.isArray(C.pulseTimes), 'pulseTimes 必须是数组');
+  req(C.pulseDur > 0, 'pulseDur 必须为正');
+  return true;
+}
+
 export function buildTimeline(cfg = CFG) {
   const C = { ...cfg }, R = C.R, k = C.k, dt = C.dt;
+  validateConfig(C);
   const st = [];
   const push = (o) => { o.t = st.length ? st[st.length - 1].t + dt : 0; st.push(o); return o; };
   const spd = (a) => rampParamSpeed(a, R, k);
@@ -145,8 +178,11 @@ export function buildTimeline(cfg = CFG) {
   // 采样点：τ = 0, dt, 2dt, ... capDur（含端点）
   const nCap = Math.max(1, Math.ceil(capDur / dt));
   let capEndA = aCap, capEndV = vCap, capOk = false;
+  let capSamples = 0, capLastTau = 0;
   for (let i = 0; i <= nCap; i++) {
+    capSamples++;
     const tau = Math.min(capDur, i * dt);
+    capLastTau = tau;
     // 解析弧长与速度（等减速，弧长域）
     const sAt = Math.min(dCap, vCap * tau - 0.5 * cMag * tau * tau);
     const vAt = Math.max(0, vCap - cMag * tau);
@@ -161,11 +197,23 @@ export function buildTimeline(cfg = CFG) {
   }
   const capEndT = st[st.length - 1].t;
   // 显式处理捕获失败
+  //
+  // 【根因修复】早前版本只在循环结束后检查 capOk。若采样步长 dt 过大，
+  // 捕获循环采样不足（最后一个采样点的 τ 远小于 capDur），
+  // 车会停在半路却被判定为"倒挂成功"。
+  // 现在分三种情况显式处理：
+  //   ① 采样点未覆盖到停止时刻 → 抛错（步长不适合此配置）
+  //   ② 跑完但没到顶点        → 抛错（给出实际停车角度与残余速度）
+  //   ③ 到达顶点但仍有残余速度 → 抛错
   if (!capOk) {
-    const err = Math.abs(Math.PI - capEndA);
-    if (err > 1e-6 || capEndV > 1e-6) {
-      throw new Error(`磁吸捕获失败: 停在 a=${(capEndA * 180 / Math.PI).toFixed(6)}° (目标 180°), 残余速度 ${capEndV.toFixed(6)} m/s`);
+    if (capLastTau < capDur - 1e-9) {
+      throw new Error(
+        `磁吸捕获失败: 采样未覆盖停止时刻（最后 τ=${capLastTau.toFixed(6)}s < 需要的 ${capDur.toFixed(6)}s），` +
+        `采样步长 ${dt.toFixed(6)}s 过大，请减小步长`);
     }
+    throw new Error(
+      `磁吸捕获失败: 停在 a=${(capEndA * 180 / Math.PI).toFixed(6)}° (目标 180°), ` +
+      `残余速度 ${capEndV.toFixed(6)} m/s`);
   }
   // 顶部倒挂保持
   for (let i = 0; i < Math.round(C.holdTime / dt); i++)
@@ -182,21 +230,58 @@ export function buildTimeline(cfg = CFG) {
   const vhx = fwd0.x * C.vh, vhz = fwd0.z * C.vh;
   const freeStart = st.length;
   let tTouch = 0, landed = false;
+
+  // 气垫段解析解状态
+  //   模型：按剩余高度反解所需减速度 a = v²/(2h)（恰好能在剩余高度内停住）
+  //   分离变量 dv/dh = v/(2h) ⇒ v(h) = v₀·√(h/h₀)
+  //   ⇒ h(t) = (√h₀ − C·t/2)²,  C = v₀/√h₀
+  //   h→0 时 v→0 严格成立。
+  //
+  //   【为什么必须用解析解】早期版本对反解方程做欧拉离散积分，
+  //   必然产生两种缺陷：
+  //     ① max(0.12,h) 地板给减速度设上限 → 触地残余速度 ~1.08 m/s
+  //     ② 即使去掉地板，离散步进仍过冲 → 触地时位置已低于地面，
+  //        速度被强行置 0 → 触地瞬间速度突变（1.077 → 0）。
+  //   解析解从根上消除了"离散化 vs 连续反解"的矛盾。
+  let cushH0 = null, cushV0 = 0, cushC = 0, cushT0 = 0;
+
   while (tl < 24) {
-    const h = y - C.halfCar;   // 离地高度（轮胎）
-    let aAcc, kind, thr;
+    const h = y - C.halfCar;   // 离地高度（轮胎最低点）
+    let aAcc = 0, kind, thr;
+
     if (h <= C.cushionH && vy > 0.02) {
-      // 气垫缓冲：按剩余高度连续反解所需减速度 → 零速触地
-      aAcc = -(vy * vy) / (2 * Math.max(0.12, h));
+      // ---- 气垫段：解析解 ----
+      if (cushH0 === null) {
+        cushH0 = Math.max(1e-9, h);
+        cushV0 = vy;
+        cushC = cushV0 / Math.sqrt(cushH0);
+        cushT0 = tl;
+      }
+      const dt2 = tl - cushT0;
+      const root = Math.sqrt(cushH0) - cushC * dt2 / 2;
+      const hNew = root > 0 ? root * root : 0;
+      const vNew = root > 0 ? cushC * root : 0;
+      // 瞬时减速度（用于 gLoad 显示）：a = v²/(2h)
+      aAcc = hNew > 1e-9 ? -(vNew * vNew) / (2 * hNew) : 0;
+      vy = vNew;
+      y = C.halfCar + hNew;
       kind = 'cushion'; thr = 1.0;
-      mist = smoothstep(1 - h / C.cushionH);
-    } else {
-      // 反推喷口：推力随速度上升 → 净下压加速度衰减
-      const net = C.descentA0 * (1 - C.descentFall * clamp(vy / C.vRef, 0, 1));
-      aAcc = net;
-      kind = (tl < C.rollDelay) ? 'descent' : 'roll';
-      thr = 1 - net / C.g; mist = 0;
+      mist = smoothstep(1 - hNew / C.cushionH);
+      roll = easeInOut((tl - C.rollDelay) / C.rollDur) * Math.PI;
+      let pl = 0;
+      for (const pt of C.pulseTimes) { const d = tl - pt; if (d >= 0 && d < C.pulseDur) pl = Math.max(pl, Math.sin(Math.PI * d / C.pulseDur) ** 2); }
+      push({ kind, x: px, y, z: pz, a: 0, v: 0, vy, roll, mist, jet: 0, pulse: pl, susp: 0, gLoad: 1 - aAcc / C.g, mag: 0, thr });
+      px += vhx * dt; pz += vhz * dt;
+      tl += dt;
+      if (hNew <= 0) { y = C.halfCar; vy = 0; tTouch = tl; landed = true; break; }
+      continue;
     }
+
+    // ---- 反推喷口段：推力随速度上升 → 净下压加速度衰减 ----
+    const net = C.descentA0 * (1 - C.descentFall * clamp(vy / C.vRef, 0, 1));
+    aAcc = net;
+    kind = (tl < C.rollDelay) ? 'descent' : 'roll';
+    thr = 1 - net / C.g; mist = 0;
     const ru = (tl - C.rollDelay) / C.rollDur;
     roll = easeInOut(ru) * Math.PI;
     let pl = 0;
@@ -214,6 +299,7 @@ export function buildTimeline(cfg = CFG) {
     const lt = i * dt;
     push({ kind: 'landed', x: px, y: C.halfCar, z: pz, a: 0, v: 0, vy: 0, roll: Math.PI, mist: Math.max(0, 1 - lt / 1.1), jet: 0, pulse: 0, susp: C.suspA * Math.exp(-6.0 * lt) * Math.cos(13 * lt), gLoad: 1, mag: 0, thr: 0 });
   }
+
 
   // ---------- 采样 ----------
   // 阶段索引：用于精确判定边界与插值
