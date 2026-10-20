@@ -16,7 +16,6 @@
     color:var(--txt);-webkit-font-smoothing:antialiased}
   #stage{position:fixed;inset:0}
   canvas{display:block;width:100%;height:100%}
-  #hud{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:5}
   .panel{position:fixed;pointer-events:none}
   /* ---- 左上 录制标识 ---- */
   #rec{top:20px;left:22px;display:flex;align-items:center;gap:9px;
@@ -47,7 +46,21 @@
     background:linear-gradient(90deg,#1f6f8f,var(--cyan) 62%,#fff);box-shadow:0 0 14px rgba(79,216,255,.5)}
   #head{position:absolute;top:-4px;width:2px;height:15px;background:#fff;box-shadow:0 0 8px #fff;left:0}
   #segs{display:flex;margin-top:7px;font-size:9.5px;letter-spacing:.09em;color:#55677d}
-  #segs span{flex:1;text-align:center;transition:color .2s}
+  #segs span{flex:1;text-align:center;transition:color .2s;
+    overflow:hidden;text-overflow:clip;white-space:nowrap}
+  /* 窄屏：分段标签太挤，隐藏文字只保留色块 */
+  @media (max-width:760px){
+    #segs span{font-size:0}
+    #segs span::after{content:'';display:block;height:3px;margin:4px 2px 0;
+      background:currentColor;border-radius:2px;opacity:.5}
+    #segs span.on::after{opacity:1;background:var(--cyan)}
+    #tl{width:92vw;bottom:18px}
+    #tel{bottom:74px;left:14px;width:150px}
+    #spd{font-size:38px}
+    #minip{right:12px;bottom:74px;width:74px;height:135px}
+    #minip svg{width:74px;height:135px}
+    #hint{font-size:9px;right:12px;bottom:64px}
+  }
   #segs span.on{color:var(--cyan)}
   #segs span.done{color:#8ea3ba}
   /* ---- 提示 ---- */
@@ -63,21 +76,6 @@
 <body>
 <div id="stage"></div>
 <div class="vh"></div>
-
-<svg id="hud" viewBox="0 0 1600 813" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-  <defs>
-    <linearGradient id="gBar" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#2b7fa0"/><stop offset="0.6" stop-color="#4fd8ff"/><stop offset="1" stop-color="#ffffff"/>
-    </linearGradient>
-    <radialGradient id="glow"><stop offset="0" stop-color="#fff" stop-opacity=".9"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
-    <filter id="soft"><feGaussianBlur stdDeviation="1.6"/></filter>
-  </defs>
-
-  <!-- 右下：C 形坡道侧视示意图 + 车辆位置 -->
-
-  <!-- 速度矢量指示 -->
-  <g id="vecInd" opacity="0"></g>
-</svg>
 
 <div class="panel" id="rec"><span id="dot"></span><b>REC</b> <span id="tc">T+00:00.00</span> <span>· 8K 60p · LOG</span></div>
 
@@ -141,6 +139,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import * as RG from './ramp-geometry.js';
 
 
 // ============================================================
@@ -167,7 +166,9 @@ document.getElementById('stage').appendChild(renderer.domElement);
   const pmrem = new THREE.PMREMGenerator(renderer);
   const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
   scene.environment = env;
-  scene.environmentIntensity = 0.26;
+  // 注意：scene.environmentIntensity 是 three r163+ 才有的属性，
+  // 本项目使用 r160 —— 写上去只是静默无效的死代码。
+  // 环境光强度通过各材质的 envMapIntensity 控制（下方各材质已分别设置）。
   pmrem.dispose();
 }
 
@@ -200,8 +201,13 @@ const fill = new THREE.DirectionalLight(0x6b8cba, 0.48);
 fill.position.set(20, 26, 40);
 scene.add(fill);
 
+// 跟车补光：保证任何姿态（正立/侧躺/倒挂）下车身都有可读细节
+const carFill = new THREE.DirectionalLight(0xbcd2e8, 0.55);
+scene.add(carFill);
+scene.add(carFill.target);
+
 // 坡道磁吸区辉光
-const magGlow = new THREE.PointLight(0x4fd8ff, 0, 40, 2);
+const magGlow = new THREE.PointLight(0x4fd8ff, 0, 26, 2);
 scene.add(magGlow);
 
 // 车底喷口冷光：点光放远一点 + 柔和衰减，避免车身过曝
@@ -337,22 +343,24 @@ makeLightCone(46, 34, 26, 11, 0xffeec8, 0.13);
 makeLightCone(58, -30, 34, 14, 0xc8e6ff, 0.12);
 
 // ---------- C 形磁吸坡道 ----------
-const RAMP_R = 11.0, RAMP_K = 1.2;
+const RAMP_R = RG.RAMP.R, RAMP_K = RG.RAMP.k;
 const UP_Y = new THREE.Vector3(0, 1, 0);
-function rampPoint3(a) { return new THREE.Vector3(RAMP_R * Math.sin(a), RAMP_R * (1 - Math.cos(a)), 0.5 * RAMP_K * a * a); }
-function rampUp3(a) { return new THREE.Vector3(-Math.sin(a), Math.cos(a), 0); }  // 指向环心 = 车顶朝向
-function rampTan3(a) {
-  const v = new THREE.Vector3(RAMP_R * Math.cos(a), RAMP_R * Math.sin(a), RAMP_K * a);
-  return v.normalize();
-}
+// 坡道几何【单一事实源】= ramp-geometry.js，与运动学层共用
+const rampPoint3 = (a) => { const p = RG.rampPoint(a); return new THREE.Vector3(p.x, p.y, p.z); };
+// 路面（车实际压住的那一面）= 基准环点向【背离环心】方向偏移
+const RAMP_T = 0.55;                                  // 轨道半厚
+const rampSurf3 = (a) => { const p = RG.rampSurface(a, RAMP_T); return new THREE.Vector3(p.x, p.y, p.z); };
+const rampUp3    = (a) => { const u = RG.rampUp(a);    return new THREE.Vector3(u.x, u.y, u.z); };
+const rampTan3   = (a) => { const t = RG.rampTangent(a); return new THREE.Vector3(t.x, t.y, t.z); };
+const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3(s.x, s.y, s.z); };
 {
   const NA = 160, SW = 3.2;
   // ---- 路面（带横向纹理）----
   const pos = [], idx = [], nor = [], uv = [];
   for (let i = 0; i <= NA; i++) {
     const a = Math.PI * i / NA;
-    const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-    const r = new THREE.Vector3().crossVectors(u, tg).normalize();
+    const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+    const r = rampSide3(a);
     for (let j = 0; j <= 6; j++) {
       const off = (j / 6 - 0.5) * SW;
       const pt = p.clone().addScaledVector(r, off);
@@ -382,8 +390,8 @@ function rampTan3(a) {
     const DZ = 5;                       // 桁架分段
     for (let i = 0; i <= NA; i++) {
       const a = Math.PI * i / NA;
-      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-      const r = new THREE.Vector3().crossVectors(u, tg).normalize();
+      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+      const r = rampSide3(a);
       const edge = p.clone().addScaledVector(r, sgn * SW / 2);
       // 上弦杆（贴路面边）
       sp.push(edge.x, edge.y, edge.z); sn.push(r.x * sgn, r.y * sgn, r.z * sgn);
@@ -401,20 +409,28 @@ function rampTan3(a) {
     }));
     web.castShadow = true; web.receiveShadow = true;
     scene.add(web);
-    // 腹杆
-    for (let i = 0; i < DZ * 2; i++) {
-      const a = Math.PI * i / (DZ * 2);
-      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-      const r = new THREE.Vector3().crossVectors(u, tg).normalize();
-      const edge = p.clone().addScaledVector(r, sgn * SW / 2);
-      const low = edge.clone().addScaledVector(u, 0.55).addScaledVector(r, sgn * 0.26);
-      const mid = edge.clone().lerp(low, 0.5);
-      const len = edge.distanceTo(low);
-      const strut = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, len, 6),
-        new THREE.MeshStandardMaterial({ color: 0x2c3744, roughness: .7, metalness: .6 }));
-      strut.position.copy(mid);
-      strut.quaternion.setFromUnitVectors(UP_Y, low.clone().sub(edge).normalize());
-      scene.add(strut);
+    // 腹杆：合并为 InstancedMesh
+    {
+      const nS = DZ * 2;
+      const strutGeo = new THREE.CylinderGeometry(0.07, 0.07, 1, 6);
+      const strutMat = new THREE.MeshStandardMaterial({ color: 0x2c3744, roughness: .7, metalness: .6 });
+      const struts = new THREE.InstancedMesh(strutGeo, strutMat, nS);
+      const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
+      for (let i = 0; i < nS; i++) {
+        const a = Math.PI * i / (DZ * 2);
+        const p = rampSurf3(a), u = rampUp3(a), r = rampSide3(a);
+        const edge = p.clone().addScaledVector(r, sgn * SW / 2);
+        const low = edge.clone().addScaledVector(u, 0.55).addScaledVector(r, sgn * 0.26);
+        const mid = edge.clone().lerp(low, 0.5);
+        const len = edge.distanceTo(low);
+        qq.setFromUnitVectors(UP_Y, low.clone().sub(edge).normalize());
+        sc.set(1, len, 1);          // 圆柱默认高 1，沿 y 缩放到实际长度
+        mtx.compose(mid, qq, sc);
+        struts.setMatrixAt(i, mtx);
+      }
+      struts.instanceMatrix.needsUpdate = true;
+      struts.frustumCulled = false;
+      scene.add(struts);
     }
   }
 
@@ -423,8 +439,8 @@ function rampTan3(a) {
     const rp = [], rn = [], ri = [];
     for (let i = 0; i <= NA; i++) {
       const a = Math.PI * i / NA;
-      const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-      const r = new THREE.Vector3().crossVectors(u, tg).normalize();
+      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a);
+      const r = rampSide3(a);
       for (let j = 0; j <= 1; j++) {
         const pt = p.clone().addScaledVector(r, sgn * (0.44 + j * 0.14)).addScaledVector(u, -0.06);
         rp.push(pt.x, pt.y, pt.z); rn.push(u.x, u.y, u.z);
@@ -439,58 +455,107 @@ function rampTan3(a) {
     scene.add(rail);
   }
 
-  // ---- 磁极横条 ----
-  for (let i = 0; i <= 30; i++) {
-    const a = Math.PI * i / 30;
-    const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-    const r = new THREE.Vector3().crossVectors(u, tg).normalize();
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.06, 0.10),
-      new THREE.MeshBasicMaterial({ color: 0x1e5f7a, transparent: true, opacity: 0.85 }));
-    bar.position.copy(p).addScaledVector(u, -0.04);
-    bar.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), r);
-    scene.add(bar);
+  // ---- 磁极横条：合并为单个几何（避免 30+ 次 draw call）----
+  {
+    const barGeo = new THREE.BoxGeometry(0.85, 0.06, 0.10);
+    const barMat = new THREE.MeshBasicMaterial({ color: 0x1e5f7a, transparent: true, opacity: 0.85 });
+    const barCount = 31;
+    const bars = new THREE.InstancedMesh(barGeo, barMat, barCount);
+    const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
+    for (let i = 0; i < barCount; i++) {
+      const a = Math.PI * i / (barCount - 1);
+      const p = rampPoint3(a), u = rampUp3(a), r = rampSide3(a);
+      const pos = p.clone().addScaledVector(u, -0.04);
+      qq.setFromUnitVectors(new THREE.Vector3(1, 0, 0), r);
+      mtx.compose(pos, qq, sc);
+      bars.setMatrixAt(i, mtx);
+    }
+    bars.instanceMatrix.needsUpdate = true;
+    bars.frustumCulled = false;
+    scene.add(bars);
   }
 
-  // ---- 横向加劲肋 ----
-  for (let i = 0; i <= 16; i++) {
-    const a = Math.PI * i / 16;
-    const p = rampPoint3(a), u = rampUp3(a), tg = rampTan3(a);
-    const r = new THREE.Vector3().crossVectors(u, tg).normalize();
-    const rib = new THREE.Mesh(new THREE.BoxGeometry(SW * 0.94, 0.09, 0.30),
-      new THREE.MeshStandardMaterial({ color: 0x62727f, roughness: 0.45, metalness: 0.8, envMapIntensity: 1.6 }));
-    rib.position.copy(p).addScaledVector(u, -0.02);
-    rib.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(r, u, tg));
-    rib.castShadow = true;
-    scene.add(rib);
+  // ---- 横向加劲肋：合并为单个 InstancedMesh ----
+  {
+    const ribGeo = new THREE.BoxGeometry(SW * 0.94, 0.09, 0.30);
+    const ribMat = new THREE.MeshStandardMaterial({ color: 0x62727f, roughness: 0.45, metalness: 0.8, envMapIntensity: 1.6 });
+    const ribCount = 17;
+    const ribs = new THREE.InstancedMesh(ribGeo, ribMat, ribCount);
+    const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
+    const basis = new THREE.Matrix4();
+    for (let i = 0; i < ribCount; i++) {
+      const a = Math.PI * i / (ribCount - 1);
+      const p = rampSurf3(a), u = rampUp3(a), tg = rampTan3(a), r = rampSide3(a);
+      const pos = p.clone().addScaledVector(u, -0.02);
+      basis.makeBasis(r, u, tg);
+      qq.setFromRotationMatrix(basis);
+      mtx.compose(pos, qq, sc);
+      ribs.setMatrixAt(i, mtx);
+    }
+    ribs.instanceMatrix.needsUpdate = true;
+    ribs.frustumCulled = false;
+    ribs.castShadow = true; ribs.receiveShadow = true;
+    scene.add(ribs);
   }
 
-  // ---- 支撑桁架柱：立在路面【外侧】(背离环心)，避免遮挡车与坡道 ----
-  for (let i = 1; i < 12; i++) {
-    const a = Math.PI * i / 12;
-    const p = rampPoint3(a);
-    const u = rampUp3(a);                 // 指向环心（内侧）
-    if (p.y < 1.6) continue;
-    const bx = p.x - u.x * 2.2, bz = p.z - u.z * 2.2;   // 外侧
-    const h = p.y;
-    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.38, h, 10),
-      new THREE.MeshStandardMaterial({ color: 0x2b3542, roughness: .7, metalness: .6, envMapIntensity: 1.1 }));
-    col.position.set(bx, h / 2, bz); col.castShadow = true;
-    scene.add(col);
-    // 柱顶斜撑：从柱顶斜拉到路面外缘
-    const top = new THREE.Vector3(bx, h - 0.4, bz);
-    const edge = p.clone().addScaledVector(u, -0.15);
-    const dir = edge.clone().sub(top);
-    const br = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, dir.length(), 6),
-      new THREE.MeshStandardMaterial({ color: 0x232c37, roughness: .8, metalness: .5 }));
-    br.position.copy(top).addScaledVector(dir, 0.5);
-    br.quaternion.setFromUnitVectors(UP_Y, dir.clone().normalize());
-    scene.add(br);
+  // ---- 支撑桁架柱 + 斜撑：合并为 InstancedMesh ----
+  {
+    const colSpots = [];
+    for (let i = 1; i < 12; i++) {
+      const a = Math.PI * i / 12;
+      const p = rampSurf3(a);
+      const u = rampUp3(a);
+      if (p.y < 1.6) continue;
+      colSpots.push({ p, u });
+    }
+    const n = colSpots.length;
+    const colGeo = new THREE.CylinderGeometry(0.22, 0.38, 1, 10);
+    const colMat = new THREE.MeshStandardMaterial({ color: 0x2b3542, roughness: .7, metalness: .6, envMapIntensity: 1.1 });
+    const cols = new THREE.InstancedMesh(colGeo, colMat, n);
+    const brGeo = new THREE.CylinderGeometry(0.075, 0.075, 1, 6);
+    const brMat = new THREE.MeshStandardMaterial({ color: 0x232c37, roughness: .8, metalness: .5 });
+    const brs = new THREE.InstancedMesh(brGeo, brMat, n);
+    const mtx = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
+    for (let i = 0; i < n; i++) {
+      const { p, u } = colSpots[i];
+      const bx = p.x - u.x * 2.2, bz = p.z - u.z * 2.2;
+      const h = p.y;
+      // 柱
+      qq.identity();
+      sc.set(1, h, 1);
+      mtx.compose(new THREE.Vector3(bx, h / 2, bz), qq, sc);
+      cols.setMatrixAt(i, mtx);
+      // 斜撑
+      const top = new THREE.Vector3(bx, h - 0.4, bz);
+      const edge = p.clone().addScaledVector(u, -0.15);
+      const dir = edge.clone().sub(top);
+      qq.setFromUnitVectors(UP_Y, dir.clone().normalize());
+      sc.set(1, dir.length(), 1);
+      mtx.compose(top.clone().addScaledVector(dir, 0.5), qq, sc);
+      brs.setMatrixAt(i, mtx);
+    }
+    cols.instanceMatrix.needsUpdate = true;
+    brs.instanceMatrix.needsUpdate = true;
+    cols.frustumCulled = false; brs.frustumCulled = false;
+    cols.castShadow = true; cols.receiveShadow = true;
+    scene.add(cols); scene.add(brs);
   }
-  // 坡道入口平台
-  const plat = new THREE.Mesh(new THREE.BoxGeometry(7, 0.7, 9),
-    new THREE.MeshStandardMaterial({ color: 0x1d242d, roughness: .82, metalness: .35, envMapIntensity: 0.7 }));
-  plat.position.set(-2.6, 0.35, 0); plat.receiveShadow = true; plat.castShadow = true;
-  scene.add(plat);
+  // 坡道入口起坡台
+  // 【根因修复】原实现是一个 7×0.7×9 的方块，放在 x=-2.6 —— 正好横在助跑路径上，
+  // 车辆会直接开进平台里。改为坡道起点正下方的低矮起坡台。
+  {
+    const plat = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.24, 4.0),
+      new THREE.MeshStandardMaterial({ color: 0x1d242d, roughness: .82, metalness: .35, envMapIntensity: 0.7 }));
+    plat.position.set(-1.4, 0.12, 0); plat.receiveShadow = true; plat.castShadow = true;
+    scene.add(plat);
+    // 起坡台边缘警示条
+    for (const sgn of [-1, 1]) {
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.02, 0.16),
+        new THREE.MeshBasicMaterial({ color: 0x2c4356 }));
+      strip.position.set(-1.4, 0.25, sgn * 1.92);
+      scene.add(strip);
+    }
+  }
 }
 
 // ============================================================
@@ -625,7 +690,7 @@ function buildCar() {
     // 磁吸线圈
     for (let k = 0; k < 3; k++) {
       const c = new THREE.Mesh(new THREE.TorusGeometry(0.30 + k * 0.22, 0.018, 6, 24),
-        new THREE.MeshBasicMaterial({ color: 0x1f6b8c, transparent: true, opacity: 0.55 }));
+        new THREE.MeshBasicMaterial({ color: 0x174f68, transparent: true, opacity: 0.4 }));
       c.rotation.x = Math.PI / 2; c.position.set(0, -0.37, 0); g.add(c);
     }
   }
@@ -674,13 +739,24 @@ class PuffPool {
     const m = new THREE.Matrix4().makeScale(0, 0, 0);
     for (let i = 0; i < max; i++) this.mesh.setMatrixAt(i, m);
     this.mesh.instanceMatrix.needsUpdate = true;
-    // 每实例颜色/透明度：用 instanceColor 承载 alpha（乘到材质 opacity）
+    // instanceColor 只承载 RGB（three 的 instanceColor 无 alpha 通道），
+    // 因此透明度改由【缩放 + 颜色亮度】共同表达：死粒子缩放为 0。
     this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(max * 3), 3);
     this.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     scene.add(this.mesh);
 
+    // 【根因修复】每个粒子必须拥有【独立】的位置。
+    // 原实现把位置存在 this._p（单一共享向量）里，
+    // update() 循环中所有粒子都累加到同一个向量 → 粒子全部堆叠在同一位置。
     this.data = [];
-    for (let i = 0; i < max; i++) this.data.push({ life: 0, max: 1, vx: 0, vy: 0, vz: 0, s0: 1, s1: 2, rot: 0, spin: 0 });
+    for (let i = 0; i < max; i++) {
+      this.data.push({
+        life: 0, max: 1,
+        px: 0, py: 0, pz: 0,      // 独立位置
+        vx: 0, vy: 0, vz: 0,
+        s0: 1, s1: 2, rot: 0, spin: 0,
+      });
+    }
     this._m = new THREE.Matrix4();
     this._q = new THREE.Quaternion();
     this._p = new THREE.Vector3();
@@ -689,28 +765,44 @@ class PuffPool {
   spawn(x, y, z, vx, vy, vz, life, s0, s1) {
     const i = this.idx = (this.idx + 1) % this.max;
     const d = this.data[i];
-    d.life = life; d.max = life; d.vx = vx; d.vy = vy; d.vz = vz; d.s0 = s0; d.s1 = s1;
+    d.life = life; d.max = life;
+    d.px = x; d.py = y; d.pz = z;      // 完整覆盖旧状态
+    d.vx = vx; d.vy = vy; d.vz = vz;
+    d.s0 = s0; d.s1 = s1;
     d.rot = Math.random() * Math.PI * 2; d.spin = (Math.random() - 0.5) * 1.4;
     this._p.set(x, y, z);
     this._s.setScalar(s0);
-    this._q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), d.rot);
+    this._q.setFromAxisAngle(AXIS_Z, d.rot);
     this._m.compose(this._p, this._q, this._s);
     this.mesh.setMatrixAt(i, this._m);
+    this.mesh.setColorAt(i, TMP_C.setRGB(1, 1, 1));
     this.mesh.instanceMatrix.needsUpdate = true;
   }
   update(dt, camera) {
     const c = camera.position;
     for (let i = 0; i < this.max; i++) {
       const d = this.data[i];
-      if (d.life <= 0) { this.mesh.setColorAt(i, TMP_C.setRGB(0, 0, 0)); continue; }
+      if (d.life <= 0) {
+        // 死粒子：缩放为 0（不可见），并清零颜色
+        if (d.hidden !== true) {
+          this._m.makeScale(0, 0, 0);
+          this.mesh.setMatrixAt(i, this._m);
+          this.mesh.setColorAt(i, TMP_C.setRGB(0, 0, 0));
+          d.hidden = true;
+        }
+        continue;
+      }
+      d.hidden = false;
       d.life -= dt;
       const u = 1 - d.life / d.max;
-      this._p.x += d.vx * dt; this._p.y += d.vy * dt; this._p.z += d.vz * dt;
+      // 独立积分（不复用共享向量）
+      d.px += d.vx * dt; d.py += d.vy * dt; d.pz += d.vz * dt;
       d.vy += 1.1 * dt;
       d.vx *= (1 - 1.5 * dt); d.vz *= (1 - 1.5 * dt);
       d.rot += d.spin * dt;
       const sc = d.s0 + (d.s1 - d.s0) * u;
-      // billboard：朝相机
+      this._p.set(d.px, d.py, d.pz);
+      // billboard：面片法线(局部 +Z) 对准相机
       TMP_V.copy(c).sub(this._p).normalize();
       TMP_Q.setFromUnitVectors(FWD_Z, TMP_V);
       TMP_Q2.setFromAxisAngle(TMP_V, d.rot);
@@ -718,16 +810,36 @@ class PuffPool {
       this._s.setScalar(sc);
       this._m.compose(this._p, TMP_Q, this._s);
       this.mesh.setMatrixAt(i, this._m);
+      // 透明度用颜色亮度表达（加色混合下等价于淡出）
       const a = Math.max(0, Math.min(1, (1 - u) * 0.85) * Math.min(1, u * 9));
-      this.mesh.setColorAt(i, TMP_C.setScalar(a));
+      this.mesh.setColorAt(i, TMP_C.setRGB(a, a, a));
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
   }
+  /** 调试接口：返回真实粒子状态（与 data 结构一致） */
+  debug(limit = 8) {
+    const out = [];
+    for (let i = 0; i < this.max; i++) {
+      const d = this.data[i];
+      if (d.life <= 0) continue;
+      out.push({
+        i,
+        p: [+d.px.toFixed(3), +d.py.toFixed(3), +d.pz.toFixed(3)],
+        v: [+d.vx.toFixed(3), +d.vy.toFixed(3), +d.vz.toFixed(3)],
+        life: +d.life.toFixed(3), s0: d.s0, s1: d.s1,
+        rot: +d.rot.toFixed(3),
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+  aliveCount() { let n = 0; for (const d of this.data) if (d.life > 0) n++; return n; }
 }
 const TMP_C = new THREE.Color(), TMP_V = new THREE.Vector3();
 const TMP_Q = new THREE.Quaternion(), TMP_Q2 = new THREE.Quaternion();
 const FWD_Z = new THREE.Vector3(0, 0, 1);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
 
 const jetPuffs = new PuffPool(340, softTex, 0xffffff, 1.0);
 const mistPuffs = new PuffPool(300, mistTex, 0xffffff, 1.0);
@@ -737,11 +849,15 @@ const pulsePuffs = new PuffPool(240, softTex, 0xffffff, 1.0);
 //  相机机位
 // ============================================================
 // 机位：off 为相对车辆的偏移；lowY 为"倒挂时"的低位仰拍偏移
+// 机位：off 为【车体系】偏移（right / up / fwd 分量），look 为相对车辆的目标偏移。
+// lowY 为倒挂时 up 分量的替代值（倒挂时车顶朝下，需要换到另一侧仰拍）。
 const VIEWS = [
-  { name: 'TRACKING', fov: 36, off: { x: 7.6, y: 3.8, z: 12.4 }, lowY: 4.2, look: { x: 0.4, y: 0.2, z: 0 }, long: true },
-  { name: 'LOW HERO', fov: 30, off: { x: -5.4, y: 1.4, z: 9.0 }, lowY: 1.8, look: { x: 0, y: 0.2, z: 0 }, long: true },
-  { name: 'CRANE', fov: 40, off: { x: -9, y: 15, z: 24 }, lowY: 0, look: { x: 0, y: 9, z: 3 }, long: false },
-  { name: 'WIDE', fov: 46, off: { x: -22, y: 9, z: 36 }, lowY: -7, look: { x: 0, y: 8, z: 3 }, long: false },
+  // off.x = 侧向距离（车体 right 轴），off.y = 沿车体 up 的距离，off.z = 沿车体 fwd 的距离
+  // 侧向偏移要大、up 偏移要小 —— 避免俯视时被坡道板挡住车
+  { name: 'TRACKING', fov: 30, off: { x: 7.2, y: 0.9, z: 4.6 }, lowY: -1.6, look: { x: 0, y: 0, z: 0 } },
+  { name: 'LOW HERO', fov: 28, off: { x: -5.6, y: 0.5, z: 4.2 }, lowY: -1.0, look: { x: 0, y: 0, z: 0 } },
+  { name: 'CRANE', fov: 34, off: { x: -11, y: 4.5, z: 13 }, lowY: -3.5, look: { x: 0, y: 0, z: 0 } },
+  { name: 'WIDE', fov: 42, off: { x: -19, y: 3.5, z: 24 }, lowY: -3, look: { x: 0, y: 0, z: 0 } },
 ];
 let viewIdx = 0;
 
@@ -760,17 +876,22 @@ window.__RD__ = {
   setView(i) { viewIdx = i; }, seek(v) { t = v; },
   carPos: () => ({ x: +car.position.x.toFixed(2), y: +car.position.y.toFixed(2), z: +car.position.z.toFixed(2) }),
   camPos: () => ({ x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2) }),
-  quat: () => ({ x: +car.quaternion.x.toFixed(3), y: +car.quaternion.y.toFixed(3), z: +car.quaternion.z.toFixed(3), w: +car.quaternion.w.toFixed(3) }),
-  frames: 0, draws: 0,
-  puff: () => ({ jet: jetPuffs.data.filter(d=>d.life>0).length, pulse: pulsePuffs.data.filter(d=>d.life>0).length, mist: mistPuffs.data.filter(d=>d.life>0).length }),
-  pointSize: () => { const c=document.createElement('canvas'); const gl=c.getContext('webgl2')||c.getContext('webgl'); return {pr: renderer.getPixelRatio(), w: innerWidth, h: innerHeight}; },
-  mistDbg: () => { const out=[]; for(let i=0;i<mistPuffs.max;i++){const d=mistPuffs.data[i]; if(d.life<=0)continue;
-    out.push({p:[+mistPuffs.pos[i*3].toFixed(2),+mistPuffs.pos[i*3+1].toFixed(2),+mistPuffs.pos[i*3+2].toFixed(2)],
-    s:+mistPuffs.sc[i].toFixed(2), a:+mistPuffs.al[i].toFixed(2), life:+d.life.toFixed(2)});} return out.slice(0,6); },
+  quat: () => ({ x: +car.quaternion.x.toFixed(6), y: +car.quaternion.y.toFixed(6), z: +car.quaternion.z.toFixed(6), w: +car.quaternion.w.toFixed(6) }),
+  carBasis: () => ({
+    fwd: { x: +carFwd.x.toFixed(9), y: +carFwd.y.toFixed(9), z: +carFwd.z.toFixed(9) },
+    up:  { x: +carUp.x.toFixed(9),  y: +carUp.y.toFixed(9),  z: +carUp.z.toFixed(9) },
+    right: { x: +carRight.x.toFixed(9), y: +carRight.y.toFixed(9), z: +carRight.z.toFixed(9) },
+    xAxis: (() => { const v = new THREE.Vector3(1,0,0).applyQuaternion(car.quaternion);
+      return { x:+v.x.toFixed(9), y:+v.y.toFixed(9), z:+v.z.toFixed(9) }; })(),
+  }),
+  frames: 0,
+  puff: () => ({ jet: jetPuffs.aliveCount(), pulse: pulsePuffs.aliveCount(), mist: mistPuffs.aliveCount() }),
+  mistDbg: () => mistPuffs.debug(8),
+  jetDbg: () => jetPuffs.debug(8),
+  pulseDbg: () => pulsePuffs.debug(8),
 };
 
 let t = 0, playing = true, last = performance.now() / 1000;
-let velS = 0;             // 视觉速度平滑
 
 const PHASE_LABEL = {
   approach: ['APPROACH', '地面助跑 · 加速入坡'],
@@ -788,16 +909,18 @@ const SEG_ORDER = ['approach', 'climb', 'capture', 'hang', 'descent', 'roll', 'c
 const segs = document.getElementById('segs');
 const segSpans = [];
 {
-  const counts = {};
-  for (const s of TL.st) counts[s.kind] = (counts[s.kind] || 0) + 1;
-  const total = TL.st.length;
-  for (const k of SEG_ORDER) {
-    if (!counts[k]) continue;
-    const sp = document.createElement('span');
-    sp.textContent = PHASE_LABEL[k][0].split(' ')[0];
-    sp.dataset.k = k;
-    segs.appendChild(sp);
-    segSpans.push({ k, frac: counts[k] / total });
+  // 【根因修复】原实现用【样本计数占比】当作时间轴分段宽度。
+  // 各阶段采样密度相同，但持续时间差异极大 → 分段宽度与真实时长不符。
+  // 改用 phaseSpans() 的真实起止时间。
+  const spans = TL.phaseSpans();
+  for (const sp of spans) {
+    const k = sp.kind;
+    if (!PHASE_LABEL[k]) continue;
+    const el2 = document.createElement('span');
+    el2.textContent = PHASE_LABEL[k][0].split(' ')[0];
+    el2.dataset.k = k;
+    segs.appendChild(el2);
+    segSpans.push({ k, t0: sp.t0, t1: sp.t1, frac: sp.dur / T });
   }
 }
 
@@ -815,6 +938,10 @@ tlbar.addEventListener('pointerup', (e) => { scrubbing = false; });
 tlbar.addEventListener('pointercancel', () => { scrubbing = false; });
 
 addEventListener('keydown', (e) => {
+  // 焦点在可编辑元素时不劫持按键
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.code === 'Space') { e.preventDefault(); playing = !playing; }
   else if (e.key === 'r' || e.key === 'R') { t = 0; }
   else if (e.key === 'c' || e.key === 'C') { viewIdx = (viewIdx + 1) % VIEWS.length; }
@@ -831,7 +958,7 @@ const hud = {
   tc: el('tc'), miniRamp: el('miniRamp'), miniCar: el('miniCar'), miniDot: el('miniDot'),
   miniVec: el('miniVec'), miniAlt: el('miniAlt'), miniBody: el('miniBody'), miniRampIn: el('miniRampIn'),
   miniPlot: el('miniPlot'), miniRuler: el('miniRuler'),
-  miniW1: el('miniW1'), miniW2: el('miniW2'), vecInd: el('vecInd'),
+  miniW1: el('miniW1'), miniW2: el('miniW2'),
 };
 
 // 迷你坡道路径（SVG）—— 与标尺共用同一套世界→屏幕映射
@@ -924,12 +1051,22 @@ const carQ = new THREE.Quaternion();
 const basisM = new THREE.Matrix4();
 const carFwd = new THREE.Vector3(), carUp = new THREE.Vector3(), carRight = new THREE.Vector3();
 
+// 车辆模型局部轴（buildCar 读源码确认）：
+//   局部 +X = 车长轴（车头在 −X，车尾在 +X）
+//   局部 +Y = 车顶方向
+//   局部 +Z = 车宽轴（车轮轴沿 Z）
+//
+// makeBasis(xAxis, yAxis, zAxis) 的三列依次映射到局部 +X/+Y/+Z，
+// 因此必须传入：xAxis = 车尾方向(−fwd), yAxis = up, zAxis = 宽轴。
+//
+// 正确性由 RG.makeCarBasis 统一保证（含手性与正交化），
+// 并在 tests/kinematics.test.mjs 中断言 det=+1。
 function setCarBasis(fwd, up) {
-  carFwd.copy(fwd).normalize();
-  carUp.copy(up).normalize();
-  carRight.crossVectors(carUp, carFwd).normalize();
-  carUp.crossVectors(carFwd, carRight).normalize();
-  basisM.makeBasis(carRight, carUp, carFwd);
+  const b = RG.makeCarBasis(fwd, up);
+  carFwd.copy(b.fwd);
+  carUp.copy(b.up);
+  carRight.copy(b.right);
+  basisM.makeBasis(b.xAxis, b.up, b.right);
   carQ.setFromRotationMatrix(basisM);
   car.quaternion.copy(carQ);
 }
@@ -991,11 +1128,21 @@ function frame(now) {
   jetFill.intensity = jetI * 0.28;
   jetFill.target.position.copy(car.position);
 
+  // 跟车补光：从【相机侧】打过来，保证任何姿态下车身都有可读细节。
+  // 不能用车体 up 方向定位光源 —— 倒挂时 up 朝下会把灯放到车下方，
+  // 照到的还是被坡道遮住的车底。
+  carFill.position.set(
+    camera.position.x + (car.position.x - camera.position.x) * 0.2,
+    camera.position.y + (car.position.y - camera.position.y) * 0.2 + 2.5,
+    camera.position.z + (car.position.z - camera.position.z) * 0.2
+  );
+  carFill.target.position.copy(car.position);
+
   // 磁吸环发光
   const magOn = s.mag ? 1 : 0;
-  car.userData.magRing.material.opacity = 0.30 + magOn * 0.28 + Math.sin(nowS * 8) * 0.07 * magOn;
+  car.userData.magRing.material.opacity = 0.26 + magOn * 0.16 + Math.sin(nowS * 8) * 0.04 * magOn;
   magGlow.position.copy(car.position);
-  magGlow.intensity = magOn * 11 + (ph === 'capture' ? 9 : 0);
+  magGlow.intensity = magOn * 5 + (ph === 'capture' ? 5 : 0);
 
   // 车轮滚动
   if (ph === 'approach' || ph === 'climb') {
@@ -1010,27 +1157,38 @@ function frame(now) {
   // 解法：把机位偏移定义在"车体局部坐标系"里 —— up 方向永远跟着车身，
   // 相机始终在车的一侧，不会被坡道板穿透。
   const inverted = clamp(-s.up.y, 0, 1);
-  const carUp = new THREE.Vector3(s.up.x, s.up.y, s.up.z).normalize();
-  const carFwd = new THREE.Vector3(s.fwd.x, s.fwd.y, s.fwd.z).normalize();
-  const carRight = new THREE.Vector3().crossVectors(carUp, carFwd).normalize();
+  // 局部变量改用 camUp/camFwd/camRight —— 避免与全局的
+  // carUp/carFwd/carRight（车辆姿态基）产生 TDZ 遮蔽冲突
+  const camUp = new THREE.Vector3(s.up.x, s.up.y, s.up.z).normalize();
+  const camFwd = new THREE.Vector3(s.fwd.x, s.fwd.y, s.fwd.z).normalize();
+  const camRight = new THREE.Vector3().crossVectors(camFwd, camUp).normalize();
 
   // 偏移在车体坐标系中的分量：right 侧 + up 方向
   // 爬坡/直行时 up≈世界上方 → 相机在上方俯视
-  // 倒挂时 up 指向下 → 相机自动转到车下方仰拍，看清悬空姿态
+  // 倒挂时 up 指向下 → 相机需要转到【车底一侧】(-up) 才能看到磁吸盘，
+  //   因此 localUp 取负值（沿 -up 方向 = 朝上），从坡道下方仰拍。
   const localRight = V.off.x;                 // 侧向距离
   const localUp = V.off.y + (V.lowY - V.off.y) * Math.pow(inverted, 0.7);
   const localFwd = V.off.z;
 
+  // 窄屏（竖屏手机）时视野横向受限 → 相机按宽高比拉远，保证主体完整入画
+  const aspect = camera.aspect;
+  const wideK = clamp(1.35 / Math.max(0.35, aspect), 1, 2.6);
   const targetPos = new THREE.Vector3(
-    pos.x + carRight.x * localRight + carUp.x * localUp + carFwd.x * localFwd,
-    pos.y + carRight.y * localRight + carUp.y * localUp + carFwd.y * localFwd,
-    pos.z + carRight.z * localRight + carUp.z * localUp + carFwd.z * localFwd
+    pos.x + (camRight.x * localRight + camUp.x * localUp + camFwd.x * localFwd) * wideK,
+    pos.y + (camRight.y * localRight + camUp.y * localUp + camFwd.y * localFwd) * wideK,
+    pos.z + (camRight.z * localRight + camUp.z * localUp + camFwd.z * localFwd) * wideK
   );
-  const lookAt = V.long
-    ? new THREE.Vector3(pos.x + V.look.x, pos.y + V.look.y + 0.15, pos.z + V.look.z)
-    : new THREE.Vector3(V.look.x, V.look.y, V.look.z);
+  // 【根因修复】原实现对固定机位（long=false）用世界坐标 lookAt，
+  // 而车在 21m 高的坡道顶点 → 相机拍向地面原点，画面里根本没有车。
+  // 所有机位的 lookAt 一律相对于【车辆】计算。
+  const lookAt = new THREE.Vector3(
+    pos.x + V.look.x,
+    pos.y + V.look.y + 0.15,
+    pos.z + V.look.z
+  );
   if (!camInit) { camPos.copy(targetPos); camTarget.copy(lookAt); camInit = true; }
-  const follow = V.long ? 1 - Math.pow(0.0004, dt) : 1 - Math.pow(0.015, dt);
+  const follow = 1 - Math.pow(0.0006, dt);
   camPos.lerp(targetPos, follow);
   camTarget.lerp(lookAt, follow * 1.25);
   camera.position.copy(camPos);
@@ -1071,13 +1229,11 @@ function frame(now) {
 
   // 段落高亮
   {
-    let acc = 0;
     for (const sp of segSpans) {
       const el2 = sp.el || (sp.el = segs.querySelector(`[data-k="${sp.k}"]`));
-      const on = p >= acc && p < acc + sp.frac;
-      const done = p >= acc + sp.frac;
+      const on = t >= sp.t0 && t < sp.t1;
+      const done = t >= sp.t1;
       el2.className = on ? 'on' : (done ? 'done' : '');
-      acc += sp.frac;
     }
   }
 
