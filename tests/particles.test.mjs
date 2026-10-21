@@ -185,7 +185,7 @@ test('帧率不影响发射总数（发射量按真实时间）', () => {
 });
 
 test('池容量足够容纳最大并发粒子数', () => {
-  // 渲染层：340/300/240 容量；最长寿命 2.6s；峰值发射率约 110/s
+  // 渲染层：420/320/300 容量；最长寿命 2.6s；峰值发射率约 110/s
   const maxLife = 2.6, peakRate = 110;
   const needed = Math.ceil(maxLife * peakRate);
   for (const cap of [340, 300, 240]) {
@@ -214,11 +214,19 @@ test('instanceColor 仅承载 RGB（three 无 alpha 通道），透明度用缩�
   assert.ok(html.includes('makeScale(0, 0, 0)'), '死亡粒子应缩放为 0');
 });
 
-test('喷口方向随车体姿态旋转（用局部 -Y 变换到世界）', () => {
-  assert.ok(html.includes('new THREE.Vector3(0, -1, 0).applyQuaternion(car.quaternion)'),
-    '喷口方向必须用车体四元数变换');
-  assert.ok(html.includes('new THREE.Vector3(0, 0, side).applyQuaternion(car.quaternion)'),
-    '横滚脉冲方向必须用车体四元数变换');
+test('喷口方向随车体姿态旋转（每个喷口独立轴线，经车体四元数变换到世界）', () => {
+  // 2026-10-21 重构: 喷口从"固定车身点 + 固定 -Y"改为独立 NOZZLE 数据模型。
+  // 每个喷口有自己的局部安装位置与局部轴线, 世界坐标由车辆当前变换求得。
+  assert.ok(html.includes('class Nozzle'), '应存在 Nozzle 喷口类');
+  assert.ok(html.includes('this.localDir = new THREE.Vector3(...def.dir).normalize()'),
+    '每个喷口应持有独立的局部喷射轴线');
+  assert.ok(html.includes('this.worldDir.copy(this.localDir).applyQuaternion(carQuat).normalize()'),
+    '喷口世界方向必须经车体四元数变换 —— 车倒挂时方向自然反转');
+  assert.ok(html.includes('this.worldPos.copy(this.localPos).applyMatrix4(carMatrix)'),
+    '喷口世界位置必须经车辆矩阵变换');
+  // 旧的固定 -Y 硬编码方式必须已移除
+  assert.ok(!html.includes('new THREE.Vector3(0, -1, 0).applyQuaternion(car.quaternion)'),
+    '不应再有固定 -Y 的硬编码喷射方向');
 });
 
 // ============================================================
@@ -295,18 +303,23 @@ test('真实实现中发射量与帧率无关（按真实时间）', () => {
 });
 
 test('真实实现中喷口/脉冲方向由车体四元数变换', () => {
-  const m = html.match(/function emitJet\(dt, intensity\) \{([\s\S]*?)\n\}/);
-  assert.ok(m, '应能找到 emitJet');
-  assert.ok(/applyQuaternion\(car\.quaternion\)/.test(m[1]),
-    '喷口方向必须用车体四元数变换到世界坐标');
-  const p = html.match(/function emitPulse\(dt, intensity\) \{([\s\S]*?)\n\}/);
-  assert.ok(p, '应能找到 emitPulse');
-  assert.ok(/applyQuaternion\(car\.quaternion\)/.test(p[1]),
-    '横滚脉冲方向必须用车体四元数变换');
+  // 2026-10-21: 改为验证 NOZZLE 驱动的粒子发射路径
+  assert.ok(html.includes('function emitFromNozzles'), '应有 emitFromNozzles 统一发射函数');
+  assert.ok(html.includes('const d = n.worldDir.clone().add(jitter).normalize()'),
+    '粒子方向必须来自喷口自身轴线');
+  assert.ok(html.includes('const p = n.worldPos.clone().add('),
+    '粒子必须生成在喷口安装位置');
+  assert.ok(html.includes('n.update(car.matrixWorld, car.quaternion)'),
+    '主循环必须在渲染前更新所有喷口的世界变换');
+  assert.ok(/for \(const n of nozzles\) \{\s*\n\s*n\.update\(car\.matrixWorld, car\.quaternion\)/.test(html),
+    '所有喷口都必须逐个更新世界变换');
+  assert.ok(!html.includes('new THREE.Vector3(0, 0, side).applyQuaternion(car.quaternion)'),
+    '不应再有硬编码的侧向脉冲方向');
 });
 
 test('真实实现中粒子池容量与发射率匹配（不溢出）', () => {
-  const pools = { jetPuffs: 340, mistPuffs: 300, pulsePuffs: 240 };
+  // 2026-10-21 喷口重构: 主喷流改用几何体光束, 粒子只做扩散雾 -> 容量与寿命调整
+  const pools = { jetPuffs: 420, mistPuffs: 320, pulsePuffs: 300 };
   for (const [name, cap] of Object.entries(pools)) {
     assert.ok(html.includes(`new PuffPool(${cap}`), `${name} 容量应为 ${cap}`);
   }

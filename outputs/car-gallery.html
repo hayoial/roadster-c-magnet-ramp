@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Roadster Model Gallery</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0e14;overflow:hidden}
+  canvas{display:block}
+  #hud{position:fixed;left:0;top:0;color:#8fc3d8;font:12px/1.6 ui-monospace,monospace;
+       padding:10px 14px;letter-spacing:.1em;z-index:5;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<script type="importmap">
+{"imports":{"three":"./three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1219);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 200);
+camera.position.set(9, 2.2, 7.5);
+camera.lookAt(0, 0.45, 0);
+
+// 影棚灯
+scene.add(new THREE.HemisphereLight(0x9fc4e8, 0x1a1f26, 0.55));
+const k1 = new THREE.DirectionalLight(0xffffff, 2.4); k1.position.set(6, 9, 7); scene.add(k1);
+const k2 = new THREE.DirectionalLight(0x9ec8ff, 1.3); k2.position.set(-7, 4, -6); scene.add(k2);
+const k3 = new THREE.DirectionalLight(0xfff0d8, 0.9); k3.position.set(0, 3, 10); scene.add(k3);
+// 地面
+const grd = new THREE.Mesh(new THREE.CircleGeometry(30, 48),
+  new THREE.MeshStandardMaterial({ color: 0x1a2029, roughness: 0.85, metalness: 0.05 }));
+grd.rotation.x = -Math.PI/2; grd.position.y = -0.001; scene.add(grd);
+// 地面网格
+const grid = new THREE.GridHelper(40, 40, 0x2c3d4e, 0x1d2833);
+grid.position.y = 0.002; grid.material.transparent = true; grid.material.opacity = 0.5; scene.add(grid);
+
+// ============================================================
+//  Tesla Roadster 车身
+// ============================================================
+// ============================================================
+//  Tesla Roadster 车身 — 第二代 (依据原视频参考帧重建)
+//  参考: ref/REFERENCE-FRAMES.md
+//  局部轴约定: +X = 车长轴(车头 -X / 车尾 +X), +Y = 车顶, +Z = 车宽轴
+//  单位: 米。车长 4.42m / 车宽 1.99m / 车高 1.11m (Roadster 2 官方尺寸)
+// ============================================================
+
+// ---- 车身横截面：分层曲面控制点 ----
+// 每层给出 [x(纵向), y(高度), 半宽], 顶盖(roof)与底板(floor)分开定义，
+// 中间用腰线连接，靠近座舱处收窄形成"沙漏"侧腰。
+// 目标比例 (Tesla Roadster 2 官方尺寸): 长 4.42m / 宽 1.99m / 高 1.11m
+// 局部原点 = 接地点。车轮半径 0.345 (轮径 0.69m), 中心 y=0.345。
+// 车顶最高点 yTop = 1.11 => 座舱区顶盖 1.06~1.11, 腰线 ~0.62, 底板 ~0.30。
+const BODY_SECTIONS = [
+  // x,      yTop,   yBot,   halfWidth
+  [-2.210,  0.560,  0.560,  0.640],  // 车鼻前缘 (窄而圆)
+  [-2.140,  0.640,  0.500,  0.790],
+  [-2.000,  0.740,  0.440,  0.895],  // 前保险杠
+  [-1.760,  0.860,  0.400,  0.950],  // 前翼子板隆起
+  [-1.430,  0.935,  0.385,  0.975],  // 前轮拱顶
+  [-1.060,  0.975,  0.390,  0.985],
+  [-0.700,  1.040,  0.400,  0.990],  // 风挡根部
+  [-0.280,  1.095,  0.410,  0.995],  // 座舱前
+  [ 0.180,  1.110,  0.412,  0.995],  // 座舱中 (车顶最高 = 1.11m)
+  [ 0.560,  1.088,  0.410,  0.985],
+  [ 0.900,  1.030,  0.408,  0.950],  // 车尾玻璃起
+  [ 1.260,  0.975,  0.400,  0.920],  // 后轮拱顶
+  [ 1.620,  0.930,  0.405,  0.895],
+  [ 1.930,  0.890,  0.430,  0.840],  // 尾部收
+  [ 2.130,  0.850,  0.470,  0.730],  // 尾端
+  [ 2.210,  0.800,  0.520,  0.560],  // 尾端面
+];
+
+// 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
+const GLASS_X0 = -0.62, GLASS_X1 = 0.78;
+
+/**
+ * 车身主体：沿 X 轴放样 BODY_SECTIONS，生成带倒角腰线的封闭壳体。
+ * 截面在每个 x 处构造为一个 8 点的闭合多边形（顶盖窄、腰部宽、底板平），
+ * 沿 X 方向蒙皮。
+ */
+/**
+ * 查询车身表面在 (x, y) 处的 |z| —— 让侧裙/进气/后视镜等附件精确贴合体表,
+ * 而不是靠硬编码坐标硬摆 (硬摆会导致附件陷进车身或悬空成黑块)。
+ */
+function bodySurfaceZ(x, y) {
+  const S = BODY_SECTIONS;
+  // 1) 找 x 所在的两段并插值出 yTop/yBot/halfWidth
+  let i = 0;
+  while (i < S.length - 2 && S[i + 1][0] < x) i++;
+  const a = S[i], b = S[i + 1];
+  const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+  const yTop = a[1] + (b[1] - a[1]) * t;
+  const yBot = a[2] + (b[2] - a[2]) * t;
+  const hw   = a[3] + (b[3] - a[3]) * t;
+  // 2) 把 y 换算成截面高度权重, 再在 RING 上插值出半宽系数
+  const tw = Math.max(0, Math.min(1, (y - yBot) / (yTop - yBot || 1)));
+  const R = [
+    [0.00, 0.50], [0.09, 0.90], [0.26, 0.995], [0.50, 1.00],
+    [0.72, 0.93], [0.88, 0.72], [1.00, 0.10],
+  ];
+  let wf = R[0][1];
+  for (let k = 0; k < R.length - 1; k++) {
+    if (tw >= R[k][0] && tw <= R[k + 1][0]) {
+      const u = (tw - R[k][0]) / (R[k + 1][0] - R[k][0] || 1);
+      wf = R[k][1] + (R[k + 1][1] - R[k][1]) * u;
+      break;
+    }
+  }
+  if (tw > R[R.length - 1][0]) wf = R[R.length - 1][1];
+  return hw * wf;
+}
+
+function buildBodyShell() {
+  // 每个 X 截面是一个闭合多边形: 底板 -> 侧腰 -> 顶盖, 左右对称。
+  // 用 (dy, dzFactor) 定义 8 个轮廓点, dzFactor 是该处半宽的比例。
+  // [高度权重, 半宽系数] —— 只描述【右半边】, 左半边由镜像生成。
+  // 索引 0 = 底板中心, 索引 6 = 顶盖中心。
+  const RING = [
+    [0.00, 0.50],   // 底板中心
+    [0.09, 0.90],   // 底板边缘
+    [0.26, 0.995],  // 侧腰最宽
+    [0.50, 1.00],   // 上腰线
+    [0.72, 0.93],   // 车顶侧缘
+    [0.88, 0.72],   // 顶盖收窄
+    [1.00, 0.10],   // 顶盖中心
+  ];
+  const HALF = RING.length;                 // 7
+  // 完整环: 右半边(0..HALF-1) + 左半边镜像(不含两端中心点)
+  const RING_FULL = [];
+  for (let j = 0; j < HALF; j++) RING_FULL.push([RING[j][0],  RING[j][1],  1]);
+  for (let j = HALF - 2; j >= 1; j--) RING_FULL.push([RING[j][0], RING[j][1], -1]);
+  const RN = RING_FULL.length;              // 12
+  const pos = [], uv = [], idx = [];
+
+  for (let i = 0; i < BODY_SECTIONS.length; i++) {
+    const [px, yTop, yBot, hw] = BODY_SECTIONS[i];
+    // 顶盖在座舱区更拱: 用拱高系数
+    const arch = 0.055 * Math.sin(Math.PI * Math.max(0, Math.min(1, (px + 1.1) / 2.6)));
+    for (let j = 0; j < RN; j++) {
+      const [tw, wf, sign] = RING_FULL[j];
+      const y = yBot + (yTop - yBot) * tw;
+      const z = hw * wf * sign;          // ← 左侧取负, 这才是完整的对称截面
+      pos.push(px, y + (tw > 0.8 ? arch * (tw - 0.8) / 0.2 : 0), z);
+      uv.push(j / (RN - 1), i / (BODY_SECTIONS.length - 1));
+    }
+  }
+  const rings = BODY_SECTIONS.length;
+  for (let i = 0; i < rings - 1; i++) {
+    for (let j = 0; j < RN; j++) {
+      const a = i * RN + j;
+      const b = i * RN + ((j + 1) % RN);
+      const c = (i + 1) * RN + j;
+      const d = (i + 1) * RN + ((j + 1) % RN);
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  // 前后封口
+  const addCap = (ringIdx, flip) => {
+    const s = BODY_SECTIONS[ringIdx];
+    const base = pos.length / 3;
+    pos.push(s[0], (s[1] + s[2]) / 2, 0);
+    uv.push(0.5, 0.5);
+    for (let j = 0; j < RN; j++) {
+      const a = ringIdx * RN + j, b = ringIdx * RN + ((j + 1) % RN);
+      if (flip) idx.push(base, a, b); else idx.push(base, b, a);
+    }
+  };
+  addCap(0, true);
+  addCap(rings - 1, false);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** 车顶全景玻璃：独立的深色壳，贴在车身顶盖上方 */
+function buildGlassCanopy() {
+  const pos = [], uv = [], idx = [];
+  const segs = [];
+  for (const s of BODY_SECTIONS) {
+    if (s[0] >= GLASS_X0 && s[0] <= GLASS_X1) segs.push(s);
+  }
+  const N = 9;
+  for (let i = 0; i < segs.length; i++) {
+    const [px, yTop, yBot, hw] = segs[i];
+    for (let j = 0; j < N; j++) {
+      const u = j / (N - 1);
+      // 半椭圆拱形：-1..1
+      const a = (u - 0.5) * Math.PI;
+      const z = -Math.cos(a) * hw * 0.46;
+      const y = yTop + Math.sin(a) * 0.018;
+      pos.push(px, y, z);
+      uv.push(u, i / (segs.length - 1));
+    }
+  }
+  for (let i = 0; i < segs.length - 1; i++)
+    for (let j = 0; j < N - 1; j++) {
+      const a = i * N + j, b = a + 1, c = a + N, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** 轮拱：沿 YZ 平面的半环管，包住轮胎上沿 */
+function buildWheelArch(cx, cz, r, width, color) {
+  // 轮眉: 只做上半圈(0..PI), 半径略大于轮胎。
+  // 埋进车身: 下沉一些, 只露出上缘一小段, 避免变成悬空的黑色半环。
+  const g = new THREE.TorusGeometry(r, 0.017, 6, 22, Math.PI * 0.62);
+  const m = new THREE.Mesh(g, color);
+  m.rotation.y = Math.PI / 2;
+  m.rotation.z = Math.PI * 0.19;   // 上半圈朝 +Y
+  m.position.set(cx, 0.282, cz);
+  return m;
+}
+
+function buildCar() {
+  const g = new THREE.Group();
+
+  // ---- 材质 ----
+  const paint = new THREE.MeshPhysicalMaterial({
+    color: 0xc8d2dc, roughness: 0.30, metalness: 0.08,
+    clearcoat: 0.70, clearcoatRoughness: 0.13, envMapIntensity: 0.95,
+  });
+  const glass = new THREE.MeshPhysicalMaterial({
+    color: 0x0b1219, roughness: 0.10, metalness: 0.45,
+    transmission: 0.18, thickness: 0.20, transparent: true, opacity: 0.86,
+    ior: 1.5, envMapIntensity: 0.95,
+  });
+  const darkTrim = new THREE.MeshStandardMaterial({
+    color: 0x0b0e13, roughness: 0.40, metalness: 0.75, envMapIntensity: 1.1,
+  });
+  const chrome = new THREE.MeshStandardMaterial({
+    color: 0x9aa6b4, roughness: 0.18, metalness: 0.96, envMapIntensity: 1.8,
+  });
+  const rubber = new THREE.MeshStandardMaterial({
+    color: 0x08090c, roughness: 0.92, metalness: 0.02,
+  });
+  const lens = new THREE.MeshBasicMaterial({ color: 0xdff4ff, toneMapped: false });
+  const lensRed = new THREE.MeshBasicMaterial({ color: 0xff2233, toneMapped: false });
+  let magRing = null;
+
+  // ---- 车身主体 ----
+  const body = new THREE.Mesh(buildBodyShell(), paint);
+  body.castShadow = true; body.receiveShadow = true;
+  g.add(body);
+
+  // ---- 全景玻璃车顶 ----
+  const canopy = new THREE.Mesh(buildGlassCanopy(), glass);
+  canopy.castShadow = true;
+  g.add(canopy);
+
+  // A 柱 / 车身与玻璃之间的密封条
+  {
+    const seal = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 1.42), darkTrim);
+    seal.position.set(GLASS_X0 - 0.03, 0.920, 0);
+    seal.rotation.z = 0.42;
+    g.add(seal);
+  }
+
+  // ---- 前脸：贯穿式细灯带 + 进气 ----
+  {
+    // 贯穿前灯带（贴在前鼻）
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 0.92), lens);
+    bar.position.set(-2.175, 0.520, 0);
+    g.add(bar);
+    // 下部进气口
+    const grille = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.11, 1.02), darkTrim);
+    grille.position.set(-2.02, 0.448, 0);
+    g.add(grille);
+    // 前唇
+    const lip = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.05, 1.28), darkTrim);
+    lip.position.set(-2.03, 0.424, 0);
+    g.add(lip);
+  }
+
+  // ---- 车尾：贯穿尾灯 + 扩散器 ----
+  {
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 0.78), lensRed);
+    tl.position.set(2.175, 0.545, 0);
+    g.add(tl);
+    // 尾部下沿黑色饰板
+    const valance = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.14, 1.28), darkTrim);
+    valance.position.set(1.96, 0.455, 0);
+    g.add(valance);
+    // 扩散器竖条
+    for (let k = -2; k <= 2; k++) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.10, 0.035), darkTrim);
+      fin.position.set(2.00, 0.437, k * 0.22);
+      g.add(fin);
+    }
+  }
+
+  // ---- 侧面：腰线 / 侧裙 / 轮拱 ----
+  // 轮距由体表决定: 轮拱开口略高于体表最宽处, 使轮眉与翼子板齐平
+  const WHEEL_Z = bodySurfaceZ(-1.30, 0.60) * 0.985;
+  for (const sgn of [-1, 1]) {
+    // 侧裙
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.10, 0.055, 0.055), darkTrim);
+    skirt.position.set(0.05, 0.445, sgn * (bodySurfaceZ(0.05, 0.445) - 0.012));
+    g.add(skirt);
+    // 前翼子板上的侧向进气
+    const intake = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.10, 0.05), darkTrim);
+    intake.position.set(-1.12, 0.560, sgn * (bodySurfaceZ(-1.12, 0.560) - 0.010));
+    intake.rotation.z = -0.10;
+    g.add(intake);
+    // 后视镜
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.030, 0.030), darkTrim);
+    arm.position.set(-0.62, 0.780, sgn * (bodySurfaceZ(-0.62, 0.780) - 0.04));
+    g.add(arm);
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.060, 0.16), chrome);
+    cap.position.set(-0.62, 0.790, sgn * (bodySurfaceZ(-0.62, 0.780) + 0.055));
+    g.add(cap);
+    // 轮拱
+    g.add(buildWheelArch(-1.30, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
+    g.add(buildWheelArch(1.38, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
+  }
+
+  // ---- 车轮：Roadster 大轮毂 + 细辐条 ----
+  const wheels = [];
+  for (const sx of [-1.30, 1.38]) for (const sz of [-WHEEL_Z, WHEEL_Z]) {
+    // 轮胎（带胎肩）
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.300, 0.300, 0.205, 30), rubber);
+    tire.rotation.x = Math.PI / 2;
+    tire.position.set(sx, 0.300, sz);
+    tire.castShadow = true;
+    g.add(tire);
+    // 轮圈
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.222, 0.222, 0.212, 26), chrome);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.set(sx, 0.300, sz);
+    g.add(rim);
+    // 轮圈暗面
+    const dish = new THREE.Mesh(new THREE.CylinderGeometry(0.206, 0.206, 0.218, 24), darkTrim);
+    dish.rotation.x = Math.PI / 2;
+    dish.position.set(sx, 0.300, sz);
+    g.add(dish);
+    // 10 辐条
+    for (let k = 0; k < 10; k++) {
+      const a = k * Math.PI * 2 / 10;
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.178, 0.048), chrome);
+      spoke.position.set(sx, 0.300 + Math.sin(a) * 0.100, sz + Math.cos(a) * 0.100);
+      spoke.rotation.x = -a;
+      g.add(spoke);
+    }
+    // 中心盖
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.048, 0.232, 14), darkTrim);
+    hub.rotation.x = Math.PI / 2;
+    hub.position.set(sx, 0.300, sz);
+    g.add(hub);
+    wheels.push(tire);
+  }
+
+  // ---- 车底：扩散器 / 喷口 / 磁吸盘 ----
+  {
+    const diff = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.085, 1.10), darkTrim);
+    diff.position.set(1.28, 0.442, 0);
+    g.add(diff);
+    // 后部两个推进器喷口（可见几何：短圆筒 + 内芯）
+    for (const sgn of [-1, 1]) {
+      const n = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.078, 0.13, 14), chrome);
+      n.position.set(1.66, 0.410, sgn * 0.28);
+      g.add(n);
+      const core = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.072, 0.02, 14),
+        new THREE.MeshBasicMaterial({ color: 0x0a2230 }));
+      core.position.set(1.66, 0.345, sgn * 0.28);
+      g.add(core);
+    }
+    // 磁吸盘
+    const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.05, 26), darkTrim);
+    magPad.position.set(0.10, 0.395, 0);
+    g.add(magPad);
+    magRing = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.042, 8, 34),
+      new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.75, toneMapped: false }));
+    magRing.rotation.x = Math.PI / 2;
+    magRing.position.set(0.10, 0.372, 0);
+    g.add(magRing);
+    for (let k = 0; k < 3; k++) {
+      const c = new THREE.Mesh(new THREE.TorusGeometry(0.28 + k * 0.20, 0.015, 6, 26),
+        new THREE.MeshBasicMaterial({ color: 0x174f68, transparent: true, opacity: 0.4, toneMapped: false }));
+      c.rotation.x = Math.PI / 2;
+      c.position.set(0.10, 0.368, 0);
+      g.add(c);
+    }
+  }
+
+  g.userData = { magRing, wheels, body, canopy };
+  return g;
+}
+const car = buildCar();
+scene.add(car);
+window.__car__ = car;
+window.__scene__ = scene;
+
+// 局部 y=0 即接地面 (车轮半径 0.345, 中心 y=0.345) —— 无需额外抬升
+car.position.y = 0;
+
+// 视角
+const VIEWS = {
+  front:   { p: [-10, 0.75, 0], l: [0, 0.45, 0] },
+  rear:    { p: [10, 0.75, 0],  l: [0, 0.45, 0] },
+  side:    { p: [0, 0.75, 10], l: [0, 0.45, 0] },
+  front45: { p: [-7, 1.5, 7],   l: [0, 0.45, 0] },
+  rear45:  { p: [7, 1.5, -7],   l: [0, 0.45, 0] },
+  top:     { p: [0, 11, 0.01], l: [0, 0.25, 0] },
+  bottom:  { p: [0, -9, 0.01], l: [0, 0.25, 0] },
+};
+window.__view__ = (n) => {
+  const v = VIEWS[n]; if (!v) return;
+  camera.position.set(...v.p); camera.lookAt(...v.l); camera.updateProjectionMatrix();
+  document.getElementById('hud').textContent = 'VIEW: ' + n;
+};
+window.__view__('front45');
+let spin = 0;
+window.__spin__ = (v) => { spin = v; };
+function loop(){
+  requestAnimationFrame(loop);
+  if (spin) { car.rotation.y += spin * 0.01; }
+  renderer.render(scene, camera);
+}
+loop();
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+});
+</script>
+</body>
+</html>

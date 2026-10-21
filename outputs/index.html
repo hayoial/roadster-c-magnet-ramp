@@ -183,7 +183,7 @@ const hemi = new THREE.HemisphereLight(0x2b4260, 0x090c12, 0.40);
 scene.add(hemi);
 
 // 主聚光灯（工业泛光）
-const key = new THREE.SpotLight(0xfff2dc, 1500, 240, Math.PI / 5.0, 0.62, 1.55);
+const key = new THREE.SpotLight(0xfff2dc, 700, 240, Math.PI / 5.0, 0.62, 1.55);
 key.position.set(-26, 52, 30);
 key.target.position.set(2, 8, 5);
 key.castShadow = true;
@@ -192,7 +192,7 @@ key.shadow.camera.near = 6; key.shadow.camera.far = 160;
 key.shadow.bias = -0.0012;
 scene.add(key, key.target);
 
-const rim = new THREE.SpotLight(0x8fd4ff, 1050, 210, Math.PI / 4.1, 0.66, 1.65);
+const rim = new THREE.SpotLight(0x8fd4ff, 520, 210, Math.PI / 4.1, 0.66, 1.65);
 rim.position.set(40, 38, -34);
 rim.target.position.set(0, 12, 4);
 scene.add(rim, rim.target);
@@ -202,7 +202,7 @@ fill.position.set(20, 26, 40);
 scene.add(fill);
 
 // 跟车补光：保证任何姿态（正立/侧躺/倒挂）下车身都有可读细节
-const carFill = new THREE.DirectionalLight(0xbcd2e8, 0.55);
+const carFill = new THREE.DirectionalLight(0xbcd2e8, 0.38);
 scene.add(carFill);
 scene.add(carFill.target);
 
@@ -562,148 +562,558 @@ const rampSide3  = (a) => { const s = RG.rampSide(a);   return new THREE.Vector3
 }
 
 // ============================================================
-//  Tesla Roadster 车身
+//  喷口射流锥 — 几何体光束
+//
+//  原视频 19.8-22.0s / 28.2s 可见"车底 4 条窄而平行的蓝色光束"。
+//  用细长锥体表现射流本体(连续光柱), 粒子只负责扩散雾。
+//  锥体沿喷口局部轴线, 由车体变换决定方向 —— 倒挂时自然朝上。
 // ============================================================
-function buildCar() {
-  const g = new THREE.Group();
-  const white = new THREE.MeshStandardMaterial({ color: 0xb9c4d0, roughness: 0.36, metalness: 0.10, envMapIntensity: 0.85 });
-  const glass = new THREE.MeshPhysicalMaterial({
-    color: 0x0d1a24, roughness: 0.12, metalness: 0.2, transmission: 0.5,
-    thickness: 0.3, transparent: true, opacity: 0.72, ior: 1.42, envMapIntensity: 0.5
-  });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x12161c, roughness: 0.42, metalness: 0.72, envMapIntensity: 0.9 });
-  const trim = new THREE.MeshStandardMaterial({ color: 0x8d99a6, roughness: 0.26, metalness: 0.92, envMapIntensity: 1.4 });
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x0d1014, roughness: 0.85, metalness: 0.1 });
-  let magRing = null;
+const JET_LEN = 5.2;
 
-  // ---- 车身：车削轮廓（自定义 lathe 剖面）----
-  // 剖面点 [x=车长方向, y=高度] —— 低矮流线楔形
-  const profile = [
-    [-2.05, -0.02], [-1.92, 0.10], [-1.60, 0.19], [-1.15, 0.25],
-    [-0.60, 0.28], [-0.10, 0.27], [0.45, 0.24], [1.00, 0.20],
-    [1.50, 0.15], [1.90, 0.10], [2.10, 0.02], [2.16, -0.08],
-    [2.02, -0.22], [1.55, -0.30], [0.90, -0.33], [0.20, -0.34],
-    [-0.50, -0.33], [-1.15, -0.29], [-1.70, -0.20], [-2.02, -0.08],
-  ];
-  {
-    const segs = 26, rings = profile.length;
-    const pos = [], uv = [], idx = [];
-    const widthAt = (i) => {
-      const t = i / (rings - 1);
-      return Math.min(0.70, 0.60 * Math.sin(Math.PI * Math.pow(t, 0.80)) + 0.15);
-    };
-    for (let i = 0; i < rings; i++) {
-      const [px, py] = profile[i];
-      const w = widthAt(i);
-      for (let j = 0; j <= segs; j++) {
-        const a = (j / segs) * Math.PI * 2;
-        // 上半部（py>0）做出车顶收窄，下半部保持平直
-        const roof = py > 0 ? 0.62 + 0.38 * Math.sin(a) : 1.0;
-        pos.push(px, py * roof, Math.cos(a) * w);
-        uv.push(j / segs, i / (rings - 1));
+function makeJetStream(hex) {
+  const grp = new THREE.Group();
+  const geo = new THREE.CylinderGeometry(0.028, 0.16, JET_LEN, 10, 1, true);
+  geo.translate(0, -JET_LEN / 2, 0);       // 根部对齐原点
+  geo.rotateX(Math.PI);                   // 尖端朝 -Y
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(hex) },
+      uOpacity: { value: 0 },
+      uTime: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      void main(){
+        vUv = uv;
+        vN = normalize(mat3(modelMatrix) * normal);
+        vec4 wp = modelMatrix * vec4(position,1.0);
+        vV = normalize(cameraPosition - wp.xyz);
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: `
+      precision highp float;
+      uniform vec3 uColor; uniform float uOpacity; uniform float uTime;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      void main(){
+        float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+        float core = pow(1.0 - rim, 1.6);
+        float fall = pow(1.0 - vUv.y, 2.2);
+        float flick = 0.82 + 0.18 * sin(vUv.y * 26.0 - uTime * 22.0);
+        float a = uOpacity * fall * (0.22 + core * 0.95) * flick;
+        vec3 col = mix(uColor, vec3(1.0), core * 0.55);
+        gl_FragColor = vec4(col, a);
+      }`,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending, toneMapped: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 6;
+  grp.add(mesh);
+  grp.userData = { mesh, mat };
+  return grp;
+}
+
+// ============================================================
+//  推进器喷口系统 — 独立数据模型
+//
+//  每个喷口是一个独立对象，拥有：
+//    id       稳定唯一 ID
+//    pos      车身局部坐标安装位置
+//    dir      车身局部坐标喷射轴线
+//    type     jetType: 'main' | 'attitude' | 'descent'
+//    stage    触发阶段集合
+//    gain     强度缩放
+//
+//  位置/方向依据 (ref/REFERENCE-FRAMES.md):
+//    - 21.4s / 22.0s / 28.2s 三处独立可见"车底 4 条平行蓝色光束"
+//    - 19.8-20.4s 倒挂时两侧各一道光束斜下外扩
+//    - 29.0-29.8s 左右对称的成对白羽流 (姿态控制, 与向下缓降形态不同)
+//
+//  局部轴: +X 车长(车头 -X), +Y 车顶, +Z 车宽
+//  注意: 车倒挂时 +Y 朝下, 因此朝 -Y 的喷口在世界空间是朝上的 —— 符合视频。
+// ============================================================
+
+const NOZZLE_DEFS = [
+  // ============================================================
+  // 【证据分级】
+  // 视频可见事实 (ref/REFERENCE-FRAMES.md):
+  //   19.6-20.0s  倒挂时 车尾朝向镜头, 底部 2 条蓝色光束斜下外张
+  //   20.4-21.2s  光束增至 3-4 条, 仍指向下方
+  //   21.4-22.0s  4 条平行蓝色光束, 朝下
+  //   22.5-23.3s  车翻正过程中底部涌出大量白色蒸汽, 落地成云
+  //   29.0-29.8s  左右两侧对称的成对白色羽流 (注: 属第二段踢翻, 仅作形态参考)
+  //
+  // 姿态推导: 倒挂时车停在坡道悬臂【下方】, 车顶朝下、车底朝上贴住悬臂。
+  //   => 车顶侧法向 = 局部 +Y = 世界【向下】(与画面光束朝下吻合)
+  //   => 车底侧法向 = 局部 -Y = 世界【向上】
+  // 结论: 可见的向下光束来自【车顶/上部】推进器, 这也符合 SpaceX
+  //       在演示中用车上部冷气推进器把自己推离坡道的做法。
+  //
+  // 合理近似 (视频不可见的部分, 明确标注):
+  //   - 光束具体 3D 坐标与锥角: 视频只能看出"从上部/尾部、4 条、平行朝下"
+  //   - 内部推进器结构: 视频不可见, 不作任何断言
+  // ============================================================
+
+  // ---- 车顶/尾部 4 束主喷流 (视频可见: 倒挂时向下, 4 条平行) ----
+  // 19.6s 帧: 光束自车尾/顶盖一侧射出, 指向画面左下方 (车尾朝向镜头时 = 后下方)
+  // => 局部方向 = 后向(+X 车尾) + 向下(+Y 顶盖侧) + 外扩(±Z)
+  { id: 'top-rear-l',  pos: [ 1.62, 0.930,  0.40], dir: [ 0.42,  1,  0.16], type: 'main',     stage: ['hang', 'descent', 'roll'], gain: 1.00 },
+  { id: 'top-rear-r',  pos: [ 1.62, 0.930, -0.40], dir: [ 0.42,  1, -0.16], type: 'main',     stage: ['hang', 'descent', 'roll'], gain: 1.00 },
+  { id: 'top-mid-l',   pos: [ 0.90, 1.075,  0.44], dir: [ 0.30,  1,  0.16], type: 'main',     stage: ['descent', 'roll'], gain: 0.92 },
+  { id: 'top-mid-r',   pos: [ 0.90, 1.075, -0.44], dir: [ 0.30,  1, -0.16], type: 'main',     stage: ['descent', 'roll'], gain: 0.92 },
+
+  // ---- 车底 1 束: 翻正后的【向下缓降】推力 (正立时朝下) ----
+  { id: 'under-core',  pos: [ 0.10, 0.365,  0.00], dir: [ 0, -1,  0], type: 'descent', stage: ['descent', 'cushion'], gain: 1.15 },
+
+  // ---- 姿态控制: 左右侧向成对喷口 ----
+  // 视频中"左右对称的成对白羽流"是姿态控制喷气, 形态与向下缓降不同。
+  { id: 'attitude-l',  pos: [ 0.24, 0.560,  0.95], dir: [ 0, -0.42,  1], type: 'attitude', stage: ['roll'], gain: 0.90 },
+  { id: 'attitude-r',  pos: [ 0.24, 0.560, -0.95], dir: [ 0, -0.42, -1], type: 'attitude', stage: ['roll'], gain: 0.90 },
+];
+
+/** 运行时喷口实例：持有局部常量 + 世界坐标缓存 */
+class Nozzle {
+  constructor(def) {
+    this.id = def.id;
+    this.localPos = new THREE.Vector3(...def.pos);
+    this.localDir = new THREE.Vector3(...def.dir).normalize();
+    this.type = def.type;
+    this.stages = new Set(def.stage);
+    this.gain = def.gain;
+    this.worldPos = new THREE.Vector3();
+    this.worldDir = new THREE.Vector3();
+    this.intensity = 0;      // 当前强度 (0..1)，由阶段驱动
+    this.vis = 1.0;          // 可视几何的亮度系数
+    this.stream = null;      // 射流锥体
+  }
+  /** 更新世界坐标 —— 必须走车辆当前变换，倒挂时方向自然反转 */
+  update(carMatrix, carQuat) {
+    this.worldPos.copy(this.localPos).applyMatrix4(carMatrix);
+    this.worldDir.copy(this.localDir).applyQuaternion(carQuat).normalize();
+  }
+}
+
+const nozzles = NOZZLE_DEFS.map(d => new Nozzle(d));
+const nozzlesById = Object.fromEntries(nozzles.map(n => [n.id, n]));
+
+/** 按阶段与类型设置每个喷口的强度 */
+function updateNozzles(phase, phaseIntensity) {
+  for (const n of nozzles) {
+    let want = 0;
+    if (n.stages.has(phase)) {
+      if (n.type === 'attitude') {
+        // 姿态喷气: 在 roll 阶段最活跃, 接近正立时减弱
+        want = phaseIntensity * n.gain;
+      } else if (n.type === 'descent') {
+        want = phaseIntensity * n.gain;
+      } else {
+        want = phaseIntensity * n.gain;
       }
     }
-    for (let i = 0; i < rings - 1; i++) for (let j = 0; j < segs; j++) {
-      const a = i * (segs + 1) + j, b = a + segs + 1;
-      // 绕序：使法线朝车体外侧
-      idx.push(a, a + 1, b, b, a + 1, b + 1);
+    // 平滑过渡，避免喷口开合是硬切。
+    // 但阶段刚切换时(want>0 且当前为 0)要立刻起喷, 否则会错过首次喷气时刻。
+    if (want > 0.5 && n.intensity < 0.05) n.intensity = want * 0.6;
+    else n.intensity += (want - n.intensity) * 0.25;
+
+    // 同步射流锥体
+    if (n.stream) {
+      const sm = n.stream.userData.mat.uniforms;
+      sm.uOpacity.value = n.intensity * (n.type === 'attitude' ? 0.42 : 0.92);
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    const body = new THREE.Mesh(geo, white);
-    body.castShadow = true; body.receiveShadow = true;
-    g.add(body);
   }
+}
 
-  // ---- 座舱玻璃罩 ----
+/** 创建每个喷口的射流锥体, 并挂到车辆上 */
+function buildJetStreams(carGroup) {
+  for (const n of nozzles) {
+    const isAtt = n.type === 'attitude';
+    const g = makeJetStream(isAtt ? 0xbfe4ff : 0x7fd4f5);
+    // 姿态喷气锥体更短更粗, 主喷流更长更窄
+    g.scale.set(isAtt ? 1.9 : 1, isAtt ? 0.30 : 1, isAtt ? 1.9 : 1);
+    g.position.copy(n.localPos);
+    // 锥体自身朝 -Y, 需对齐到喷口局部轴线
+    const q = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, -1, 0), n.localDir);
+    g.quaternion.copy(q);
+    carGroup.add(g);
+    n.stream = g;
+  }
+}
+
+// ============================================================
+//  Tesla Roadster 车身
+// ============================================================
+// ============================================================
+//  Tesla Roadster 车身 — 第二代 (依据原视频参考帧重建)
+//  参考: ref/REFERENCE-FRAMES.md
+//  局部轴约定: +X = 车长轴(车头 -X / 车尾 +X), +Y = 车顶, +Z = 车宽轴
+//  单位: 米。车长 4.42m / 车宽 1.99m / 车高 1.11m (Roadster 2 官方尺寸)
+// ============================================================
+
+// ---- 车身横截面：分层曲面控制点 ----
+// 每层给出 [x(纵向), y(高度), 半宽], 顶盖(roof)与底板(floor)分开定义，
+// 中间用腰线连接，靠近座舱处收窄形成"沙漏"侧腰。
+// 目标比例 (Tesla Roadster 2 官方尺寸): 长 4.42m / 宽 1.99m / 高 1.11m
+// 局部原点 = 接地点。车轮半径 0.345 (轮径 0.69m), 中心 y=0.345。
+// 车顶最高点 yTop = 1.11 => 座舱区顶盖 1.06~1.11, 腰线 ~0.62, 底板 ~0.30。
+const BODY_SECTIONS = [
+  // x,      yTop,   yBot,   halfWidth
+  [-2.210,  0.560,  0.560,  0.640],  // 车鼻前缘 (窄而圆)
+  [-2.140,  0.640,  0.500,  0.790],
+  [-2.000,  0.740,  0.440,  0.895],  // 前保险杠
+  [-1.760,  0.860,  0.400,  0.950],  // 前翼子板隆起
+  [-1.430,  0.935,  0.385,  0.975],  // 前轮拱顶
+  [-1.060,  0.975,  0.390,  0.985],
+  [-0.700,  1.040,  0.400,  0.990],  // 风挡根部
+  [-0.280,  1.095,  0.410,  0.995],  // 座舱前
+  [ 0.180,  1.110,  0.412,  0.995],  // 座舱中 (车顶最高 = 1.11m)
+  [ 0.560,  1.088,  0.410,  0.985],
+  [ 0.900,  1.030,  0.408,  0.950],  // 车尾玻璃起
+  [ 1.260,  0.975,  0.400,  0.920],  // 后轮拱顶
+  [ 1.620,  0.930,  0.405,  0.895],
+  [ 1.930,  0.890,  0.430,  0.840],  // 尾部收
+  [ 2.130,  0.850,  0.470,  0.730],  // 尾端
+  [ 2.210,  0.800,  0.520,  0.560],  // 尾端面
+];
+
+// 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
+const GLASS_X0 = -0.62, GLASS_X1 = 0.78;
+
+/**
+ * 车身主体：沿 X 轴放样 BODY_SECTIONS，生成带倒角腰线的封闭壳体。
+ * 截面在每个 x 处构造为一个 8 点的闭合多边形（顶盖窄、腰部宽、底板平），
+ * 沿 X 方向蒙皮。
+ */
+/**
+ * 查询车身表面在 (x, y) 处的 |z| —— 让侧裙/进气/后视镜等附件精确贴合体表,
+ * 而不是靠硬编码坐标硬摆 (硬摆会导致附件陷进车身或悬空成黑块)。
+ */
+function bodySurfaceZ(x, y) {
+  const S = BODY_SECTIONS;
+  // 1) 找 x 所在的两段并插值出 yTop/yBot/halfWidth
+  let i = 0;
+  while (i < S.length - 2 && S[i + 1][0] < x) i++;
+  const a = S[i], b = S[i + 1];
+  const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+  const yTop = a[1] + (b[1] - a[1]) * t;
+  const yBot = a[2] + (b[2] - a[2]) * t;
+  const hw   = a[3] + (b[3] - a[3]) * t;
+  // 2) 把 y 换算成截面高度权重, 再在 RING 上插值出半宽系数
+  const tw = Math.max(0, Math.min(1, (y - yBot) / (yTop - yBot || 1)));
+  const R = [
+    [0.00, 0.50], [0.09, 0.90], [0.26, 0.995], [0.50, 1.00],
+    [0.72, 0.93], [0.88, 0.72], [1.00, 0.10],
+  ];
+  let wf = R[0][1];
+  for (let k = 0; k < R.length - 1; k++) {
+    if (tw >= R[k][0] && tw <= R[k + 1][0]) {
+      const u = (tw - R[k][0]) / (R[k + 1][0] - R[k][0] || 1);
+      wf = R[k][1] + (R[k + 1][1] - R[k][1]) * u;
+      break;
+    }
+  }
+  if (tw > R[R.length - 1][0]) wf = R[R.length - 1][1];
+  return hw * wf;
+}
+
+function buildBodyShell() {
+  // 每个 X 截面是一个闭合多边形: 底板 -> 侧腰 -> 顶盖, 左右对称。
+  // 用 (dy, dzFactor) 定义 8 个轮廓点, dzFactor 是该处半宽的比例。
+  // [高度权重, 半宽系数] —— 只描述【右半边】, 左半边由镜像生成。
+  // 索引 0 = 底板中心, 索引 6 = 顶盖中心。
+  const RING = [
+    [0.00, 0.50],   // 底板中心
+    [0.09, 0.90],   // 底板边缘
+    [0.26, 0.995],  // 侧腰最宽
+    [0.50, 1.00],   // 上腰线
+    [0.72, 0.93],   // 车顶侧缘
+    [0.88, 0.72],   // 顶盖收窄
+    [1.00, 0.10],   // 顶盖中心
+  ];
+  const HALF = RING.length;                 // 7
+  // 完整环: 右半边(0..HALF-1) + 左半边镜像(不含两端中心点)
+  const RING_FULL = [];
+  for (let j = 0; j < HALF; j++) RING_FULL.push([RING[j][0],  RING[j][1],  1]);
+  for (let j = HALF - 2; j >= 1; j--) RING_FULL.push([RING[j][0], RING[j][1], -1]);
+  const RN = RING_FULL.length;              // 12
+  const pos = [], uv = [], idx = [];
+
+  for (let i = 0; i < BODY_SECTIONS.length; i++) {
+    const [px, yTop, yBot, hw] = BODY_SECTIONS[i];
+    // 顶盖在座舱区更拱: 用拱高系数
+    const arch = 0.055 * Math.sin(Math.PI * Math.max(0, Math.min(1, (px + 1.1) / 2.6)));
+    for (let j = 0; j < RN; j++) {
+      const [tw, wf, sign] = RING_FULL[j];
+      const y = yBot + (yTop - yBot) * tw;
+      const z = hw * wf * sign;          // ← 左侧取负, 这才是完整的对称截面
+      pos.push(px, y + (tw > 0.8 ? arch * (tw - 0.8) / 0.2 : 0), z);
+      uv.push(j / (RN - 1), i / (BODY_SECTIONS.length - 1));
+    }
+  }
+  const rings = BODY_SECTIONS.length;
+  for (let i = 0; i < rings - 1; i++) {
+    for (let j = 0; j < RN; j++) {
+      const a = i * RN + j;
+      const b = i * RN + ((j + 1) % RN);
+      const c = (i + 1) * RN + j;
+      const d = (i + 1) * RN + ((j + 1) % RN);
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  // 前后封口
+  const addCap = (ringIdx, flip) => {
+    const s = BODY_SECTIONS[ringIdx];
+    const base = pos.length / 3;
+    pos.push(s[0], (s[1] + s[2]) / 2, 0);
+    uv.push(0.5, 0.5);
+    for (let j = 0; j < RN; j++) {
+      const a = ringIdx * RN + j, b = ringIdx * RN + ((j + 1) % RN);
+      if (flip) idx.push(base, a, b); else idx.push(base, b, a);
+    }
+  };
+  addCap(0, true);
+  addCap(rings - 1, false);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** 车顶全景玻璃：独立的深色壳，贴在车身顶盖上方 */
+function buildGlassCanopy() {
+  const pos = [], uv = [], idx = [];
+  const segs = [];
+  for (const s of BODY_SECTIONS) {
+    if (s[0] >= GLASS_X0 && s[0] <= GLASS_X1) segs.push(s);
+  }
+  const N = 9;
+  for (let i = 0; i < segs.length; i++) {
+    const [px, yTop, yBot, hw] = segs[i];
+    for (let j = 0; j < N; j++) {
+      const u = j / (N - 1);
+      // 半椭圆拱形：-1..1
+      const a = (u - 0.5) * Math.PI;
+      const z = -Math.cos(a) * hw * 0.46;
+      const y = yTop + Math.sin(a) * 0.018;
+      pos.push(px, y, z);
+      uv.push(u, i / (segs.length - 1));
+    }
+  }
+  for (let i = 0; i < segs.length - 1; i++)
+    for (let j = 0; j < N - 1; j++) {
+      const a = i * N + j, b = a + 1, c = a + N, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** 轮拱：沿 YZ 平面的半环管，包住轮胎上沿 */
+function buildWheelArch(cx, cz, r, width, color) {
+  // 轮眉: 只做上半圈(0..PI), 半径略大于轮胎。
+  // 埋进车身: 下沉一些, 只露出上缘一小段, 避免变成悬空的黑色半环。
+  const g = new THREE.TorusGeometry(r, 0.017, 6, 22, Math.PI * 0.62);
+  const m = new THREE.Mesh(g, color);
+  m.rotation.y = Math.PI / 2;
+  m.rotation.z = Math.PI * 0.19;   // 上半圈朝 +Y
+  m.position.set(cx, 0.282, cz);
+  return m;
+}
+
+function buildCar() {
+  const g = new THREE.Group();
+
+  // ---- 材质 ----
+  const paint = new THREE.MeshPhysicalMaterial({
+    color: 0xc8d2dc, roughness: 0.30, metalness: 0.08,
+    clearcoat: 0.70, clearcoatRoughness: 0.13, envMapIntensity: 0.95,
+  });
+  const glass = new THREE.MeshPhysicalMaterial({
+    color: 0x0b1219, roughness: 0.10, metalness: 0.45,
+    transmission: 0.18, thickness: 0.20, transparent: true, opacity: 0.86,
+    ior: 1.5, envMapIntensity: 0.95,
+  });
+  const darkTrim = new THREE.MeshStandardMaterial({
+    color: 0x0b0e13, roughness: 0.40, metalness: 0.75, envMapIntensity: 1.1,
+  });
+  const chrome = new THREE.MeshStandardMaterial({
+    color: 0x9aa6b4, roughness: 0.18, metalness: 0.96, envMapIntensity: 1.8,
+  });
+  const rubber = new THREE.MeshStandardMaterial({
+    color: 0x08090c, roughness: 0.92, metalness: 0.02,
+  });
+  const lens = new THREE.MeshBasicMaterial({ color: 0xdff4ff, toneMapped: false });
+  const lensRed = new THREE.MeshBasicMaterial({ color: 0xff2233, toneMapped: false });
+  let magRing = null;
+
+  // ---- 车身主体 ----
+  const body = new THREE.Mesh(buildBodyShell(), paint);
+  body.castShadow = true; body.receiveShadow = true;
+  g.add(body);
+
+  // ---- 全景玻璃车顶 ----
+  const canopy = new THREE.Mesh(buildGlassCanopy(), glass);
+  canopy.castShadow = true;
+  g.add(canopy);
+
+  // A 柱 / 车身与玻璃之间的密封条
   {
-    const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.42, 26, 18, 0, Math.PI * 2, 0, Math.PI * 0.56), glass);
-    canopy.scale.set(1.30, 0.92, 1.02);
-    canopy.position.set(0.18, 0.24, 0);
-    g.add(canopy);
-    // 玻璃边框
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.44, 0.022, 6, 30), trim);
-    rim.rotation.x = Math.PI / 2; rim.scale.set(1.30, 1.02, 1);
-    rim.position.set(0.18, 0.245, 0);
-    g.add(rim);
+    const seal = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 1.42), darkTrim);
+    seal.position.set(GLASS_X0 - 0.03, 0.920, 0);
+    seal.rotation.z = 0.42;
+    g.add(seal);
   }
 
-  // ---- 前舱盖分缝 / 引擎盖 ----
+  // ---- 前脸：贯穿式细灯带 + 进气 ----
   {
-    const hood = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.05, 0.80), white);
-    hood.position.set(-1.42, 0.235, 0);
-    hood.rotation.z = -0.05;
-    g.add(hood);
+    // 贯穿前灯带（贴在前鼻）
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 0.92), lens);
+    bar.position.set(-2.175, 0.520, 0);
+    g.add(bar);
+    // 下部进气口
+    const grille = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.11, 1.02), darkTrim);
+    grille.position.set(-2.02, 0.448, 0);
+    g.add(grille);
+    // 前唇
+    const lip = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.05, 1.28), darkTrim);
+    lip.position.set(-2.03, 0.424, 0);
+    g.add(lip);
   }
 
-  // ---- 侧裙 + 侧进气 ----
+  // ---- 车尾：贯穿尾灯 + 扩散器 ----
+  {
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 0.78), lensRed);
+    tl.position.set(2.175, 0.545, 0);
+    g.add(tl);
+    // 尾部下沿黑色饰板
+    const valance = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.14, 1.28), darkTrim);
+    valance.position.set(1.96, 0.455, 0);
+    g.add(valance);
+    // 扩散器竖条
+    for (let k = -2; k <= 2; k++) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.10, 0.035), darkTrim);
+      fin.position.set(2.00, 0.437, k * 0.22);
+      g.add(fin);
+    }
+  }
+
+  // ---- 侧面：腰线 / 侧裙 / 轮拱 ----
+  // 轮距由体表决定: 轮拱开口略高于体表最宽处, 使轮眉与翼子板齐平
+  const WHEEL_Z = bodySurfaceZ(-1.30, 0.60) * 0.985;
   for (const sgn of [-1, 1]) {
-    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.55, 0.085, 0.11), dark);
-    skirt.position.set(0.05, -0.24, sgn * 0.635); g.add(skirt);
-    const intake = new THREE.Mesh(new THREE.BoxGeometry(0.50, 0.17, 0.07), dark);
-    intake.position.set(-0.72, -0.09, sgn * 0.665); g.add(intake);
-    const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.07, 0.20), trim);
-    mirror.position.set(-0.52, 0.22, sgn * 0.60); g.add(mirror);
-    // 前灯
-    const fl = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.075, 0.30),
-      new THREE.MeshBasicMaterial({ color: 0xe8f6ff }));
-    fl.position.set(-1.98, 0.03, sgn * 0.28); g.add(fl);
-    // 尾灯
-    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 0.32),
-      new THREE.MeshBasicMaterial({ color: 0xff2b3c }));
-    tl.position.set(2.05, 0.04, sgn * 0.24); g.add(tl);
+    // 侧裙
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.10, 0.055, 0.055), darkTrim);
+    skirt.position.set(0.05, 0.445, sgn * (bodySurfaceZ(0.05, 0.445) - 0.012));
+    g.add(skirt);
+    // 前翼子板上的侧向进气
+    const intake = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.10, 0.05), darkTrim);
+    intake.position.set(-1.12, 0.560, sgn * (bodySurfaceZ(-1.12, 0.560) - 0.010));
+    intake.rotation.z = -0.10;
+    g.add(intake);
+    // 后视镜
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.030, 0.030), darkTrim);
+    arm.position.set(-0.62, 0.780, sgn * (bodySurfaceZ(-0.62, 0.780) - 0.04));
+    g.add(arm);
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.060, 0.16), chrome);
+    cap.position.set(-0.62, 0.790, sgn * (bodySurfaceZ(-0.62, 0.780) + 0.055));
+    g.add(cap);
+    // 轮拱
+    g.add(buildWheelArch(-1.30, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
+    g.add(buildWheelArch(1.38, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
   }
 
-  // ---- 车轮 ----
+  // ---- 车轮：Roadster 大轮毂 + 细辐条 ----
   const wheels = [];
-  for (const sx of [-1.32, 1.36]) for (const sz of [-0.64, 0.64]) {
-    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.30, 0.24, 24), rubber);
-    w.rotation.x = Math.PI / 2; w.position.set(sx, -0.28, sz);
-    w.castShadow = true; g.add(w);
-    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.185, 0.185, 0.26, 18), trim);
-    rim.rotation.x = Math.PI / 2; rim.position.set(sx, -0.28, sz); g.add(rim);
-    // 轮辐（绕轮轴排布）
-    for (let k = 0; k < 5; k++) {
-      const a = k * Math.PI * 2 / 5;
-      const sp = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.16, 0.085), dark);
-      sp.position.set(sx, -0.28 + Math.sin(a) * 0.10, sz + Math.cos(a) * 0.10);
-      sp.rotation.x = -a;
-      g.add(sp);
+  for (const sx of [-1.30, 1.38]) for (const sz of [-WHEEL_Z, WHEEL_Z]) {
+    // 轮胎（带胎肩）
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.300, 0.300, 0.205, 30), rubber);
+    tire.rotation.x = Math.PI / 2;
+    tire.position.set(sx, 0.300, sz);
+    tire.castShadow = true;
+    g.add(tire);
+    // 轮圈
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.222, 0.222, 0.212, 26), chrome);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.set(sx, 0.300, sz);
+    g.add(rim);
+    // 轮圈暗面
+    const dish = new THREE.Mesh(new THREE.CylinderGeometry(0.206, 0.206, 0.218, 24), darkTrim);
+    dish.rotation.x = Math.PI / 2;
+    dish.position.set(sx, 0.300, sz);
+    g.add(dish);
+    // 10 辐条
+    for (let k = 0; k < 10; k++) {
+      const a = k * Math.PI * 2 / 10;
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.178, 0.048), chrome);
+      spoke.position.set(sx, 0.300 + Math.sin(a) * 0.100, sz + Math.cos(a) * 0.100);
+      spoke.rotation.x = -a;
+      g.add(spoke);
     }
-    wheels.push(w);
+    // 中心盖
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.048, 0.232, 14), darkTrim);
+    hub.rotation.x = Math.PI / 2;
+    hub.position.set(sx, 0.300, sz);
+    g.add(hub);
+    wheels.push(tire);
   }
 
   // ---- 车底：扩散器 / 喷口 / 磁吸盘 ----
   {
-    const diff = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.09, 1.10), dark);
-    diff.position.set(1.25, -0.33, 0); g.add(diff);
+    const diff = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.085, 1.10), darkTrim);
+    diff.position.set(1.28, 0.442, 0);
+    g.add(diff);
+    // 后部两个推进器喷口（可见几何：短圆筒 + 内芯）
     for (const sgn of [-1, 1]) {
-      const n = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.095, 0.15, 12), trim);
-      n.position.set(0.95, -0.38, sgn * 0.30); g.add(n);
+      const n = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.078, 0.13, 14), chrome);
+      n.position.set(1.66, 0.410, sgn * 0.28);
+      g.add(n);
+      const core = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.072, 0.02, 14),
+        new THREE.MeshBasicMaterial({ color: 0x0a2230 }));
+      core.position.set(1.66, 0.345, sgn * 0.28);
+      g.add(core);
     }
-    // 磁吸盘：车底中央
-    const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.80, 0.80, 0.055, 24), dark);
-    magPad.position.set(0, -0.355, 0); g.add(magPad);
-    magRing = new THREE.Mesh(new THREE.TorusGeometry(0.80, 0.048, 8, 32),
-      new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.75 }));
-    magRing.rotation.x = Math.PI / 2; magRing.position.set(0, -0.385, 0); g.add(magRing);
-    // 磁吸线圈
+    // 磁吸盘
+    const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.05, 26), darkTrim);
+    magPad.position.set(0.10, 0.395, 0);
+    g.add(magPad);
+    magRing = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.042, 8, 34),
+      new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.75, toneMapped: false }));
+    magRing.rotation.x = Math.PI / 2;
+    magRing.position.set(0.10, 0.372, 0);
+    g.add(magRing);
     for (let k = 0; k < 3; k++) {
-      const c = new THREE.Mesh(new THREE.TorusGeometry(0.30 + k * 0.22, 0.018, 6, 24),
-        new THREE.MeshBasicMaterial({ color: 0x174f68, transparent: true, opacity: 0.4 }));
-      c.rotation.x = Math.PI / 2; c.position.set(0, -0.37, 0); g.add(c);
+      const c = new THREE.Mesh(new THREE.TorusGeometry(0.28 + k * 0.20, 0.015, 6, 26),
+        new THREE.MeshBasicMaterial({ color: 0x174f68, transparent: true, opacity: 0.4, toneMapped: false }));
+      c.rotation.x = Math.PI / 2;
+      c.position.set(0.10, 0.368, 0);
+      g.add(c);
     }
   }
 
-  g.userData = { magRing, wheels };
+  g.userData = { magRing, wheels, body, canopy };
   return g;
 }
 const car = buildCar();
+buildJetStreams(car);
 scene.add(car);
 window.__scene__ = scene;
+window.__car__ = car;
+window.__nozzles__ = () => nozzles.map(n => ({
+  id: n.id, type: n.type,
+  localPos: [+n.localPos.x.toFixed(3), +n.localPos.y.toFixed(3), +n.localPos.z.toFixed(3)],
+  localDir: [+n.localDir.x.toFixed(3), +n.localDir.y.toFixed(3), +n.localDir.z.toFixed(3)],
+  worldPos: [+n.worldPos.x.toFixed(2), +n.worldPos.y.toFixed(2), +n.worldPos.z.toFixed(2)],
+  worldDir: [+n.worldDir.x.toFixed(3), +n.worldDir.y.toFixed(3), +n.worldDir.z.toFixed(3)],
+  intensity: +n.intensity.toFixed(3),
+}));
 
 // ============================================================
 //  冷气 / 白雾粒子系统
@@ -721,12 +1131,30 @@ function makeSoftSprite(inner, outer) {
 }
 const softTex = makeSoftSprite('rgba(255,255,255,.78)', 'rgba(230,244,255,.30)');
 const mistTex = makeSoftSprite('rgba(255,255,255,.40)', 'rgba(215,234,250,.16)');
+// 窄束状喷流贴图: 中央高亮核心 + 快速衰减的窄边 —— 对应视频里"细长平行光束"
+function makeJetSprite(){
+  const c=document.createElement('canvas'); c.width=c.height=64;
+  const x=c.getContext('2d');
+  const grd=x.createRadialGradient(32,32,0,32,32,32);
+  grd.addColorStop(0,   'rgba(210,245,255,.95)');
+  grd.addColorStop(0.18,'rgba(120,215,245,.72)');
+  grd.addColorStop(0.45,'rgba(60,175,225,.30)');
+  grd.addColorStop(1,   'rgba(30,120,180,0)');
+  x.fillStyle=grd; x.fillRect(0,0,64,64);
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; return t;
+}
+const jetTex = makeJetSprite();
 
 // 粒子池：使用 InstancedMesh billboard 面片
 // （不用 Points —— SwiftShader 的点精灵尺寸上限会把大粒子整批丢弃）
 class PuffPool {
-  constructor(max, tex, color, sizeMul) {
+  constructor(max, tex, color, sizeMul, phys = {}) {
     this.max = max; this.idx = 0;
+    // 物理参数: 主喷流是定向射流(无重力、几乎无阻力、几乎不减速)
+    // 白雾是自由扩散(有重力、阻力、减速)
+    this.gravity   = phys.gravity   !== undefined ? phys.gravity   : 1.1;
+    this.drag      = phys.drag      !== undefined ? phys.drag      : 1.5;
+    this.slowdown  = phys.slowdown  !== undefined ? phys.slowdown  : 0;
     const geo = new THREE.PlaneGeometry(1, 1);
     const mat = new THREE.MeshBasicMaterial({
       map: tex, color: new THREE.Color(color), transparent: true,
@@ -800,8 +1228,12 @@ class PuffPool {
       const u = 1 - d.life / d.max;
       // 独立积分（不复用共享向量）
       d.px += d.vx * dt; d.py += d.vy * dt; d.pz += d.vz * dt;
-      d.vy += 1.1 * dt;
-      d.vx *= (1 - 1.5 * dt); d.vz *= (1 - 1.5 * dt);
+      d.vy += this.gravity * dt;
+      d.vx *= (1 - this.drag * dt); d.vz *= (1 - this.drag * dt);
+      if (this.slowdown > 0) {
+        const k = 1 - this.slowdown * dt;
+        d.vx *= k; d.vy *= k; d.vz *= k;
+      }
       d.rot += d.spin * dt;
       const sc = d.s0 + (d.s1 - d.s0) * u;
       this._p.set(d.px, d.py, d.pz);
@@ -844,9 +1276,12 @@ const TMP_Q = new THREE.Quaternion(), TMP_Q2 = new THREE.Quaternion();
 const FWD_Z = new THREE.Vector3(0, 0, 1);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
 
-const jetPuffs = new PuffPool(340, softTex, 0xffffff, 1.0);
-const mistPuffs = new PuffPool(300, mistTex, 0xffffff, 1.0);
-const pulsePuffs = new PuffPool(240, softTex, 0xffffff, 1.0);
+// 主喷流: 青蓝色窄束 (原视频 19.8-22.0s 可见的 4 条平行蓝色光束)
+const jetPuffs = new PuffPool(420, jetTex, 0x86d8f5, 1.0, { gravity: 0.0, drag: 0.12, slowdown: 0.0 });
+// 姿态喷气: 白蓝色羽流 (原视频 29.0-29.8s 左右对称的成对白羽流)
+const pulsePuffs = new PuffPool(300, softTex, 0xcfe8ff, 1.0, { gravity: 0.6, drag: 0.9, slowdown: 0.0 });
+// 贴地白雾: 落地/近地时的大团蒸汽云
+const mistPuffs = new PuffPool(320, mistTex, 0xffffff, 1.0, { gravity: 0.35, drag: 1.9, slowdown: 0.6 });
 
 // ============================================================
 //  相机机位
@@ -1004,52 +1439,60 @@ const MINI = { SC: 2.3, OX: 52, OY: 22 };
   hud.miniRuler.innerHTML = rr;
 }
 
+
+/** 由喷口直接驱动粒子发射 —— 粒子严格从喷口位置沿喷口轴线喷出 */
+function emitFromNozzles(dt, carGroup, jetPuffs, pulsePuffs) {
+  if (dt <= 0) return;
+  for (const n of nozzles) {
+    if (n.intensity <= 0.015) continue;
+    const isAttitude = n.type === 'attitude';
+    const rate = isAttitude ? 46 : 26;
+    const count = Math.min(6, Math.floor(n.intensity * rate * dt + Math.random()));
+    for (let i = 0; i < count; i++) {
+      // 抖动只作用在喷口轴线周围, 不改变主方向
+      // 抖动: 主喷流要窄(平行光束), 姿态喷气要散(羽流)
+      const jit = isAttitude ? 0.42 : 0.075;
+      const jitter = new THREE.Vector3(
+        (Math.random() - 0.5) * jit,
+        (Math.random() - 0.5) * jit * 0.7,
+        (Math.random() - 0.5) * jit
+      );
+      const d = n.worldDir.clone().add(jitter).normalize();
+      const sp = (isAttitude ? 3.4 : 16.0) * (0.85 + Math.random() * 0.35) * n.intensity;
+      const p = n.worldPos.clone().add(
+        new THREE.Vector3((Math.random() - 0.5) * 0.05,
+                         (Math.random() - 0.5) * 0.04,
+                         (Math.random() - 0.5) * 0.05)
+      );
+      // 生命周期: 主喷流短促(光束感), 姿态喷气略长
+      const life = isAttitude ? 0.26 + Math.random() * 0.24 : 0.34 + Math.random() * 0.26;
+      // 尺寸: 主喷流细长 —— 初始小, 拉长后收窄
+      const s0 = isAttitude ? 0.20 + Math.random() * 0.14 : 0.13 + Math.random() * 0.06;
+      const s1 = isAttitude ? 0.85 + Math.random() * 0.60 : 0.16 + Math.random() * 0.10;
+      (isAttitude ? pulsePuffs : jetPuffs).spawn(
+        p.x, p.y, p.z, d.x * sp, d.y * sp, d.z * sp, life, s0, s1
+      );
+    }
+  }
+}
+
 // ============================================================
 //  粒子发射
 // ============================================================
 const _v = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4();
 const UP = new THREE.Vector3(0, 1, 0);
 
-function emitJet(dt, intensity) {
-  if (intensity <= 0.01) return;
-  const n = Math.min(8, Math.floor(intensity * 55 * dt + Math.random()));
-  for (let i = 0; i < n; i++) {
-    car.updateMatrixWorld();
-    const p = new THREE.Vector3(0.78, -0.5, (Math.random() - 0.5) * 0.5);
-    p.applyMatrix4(car.matrixWorld);
-    // 沿车底"下"方向喷出
-    const dir = new THREE.Vector3(0, -1, 0).applyQuaternion(car.quaternion);
-    const spread = 0.35;
-    const d = dir.clone().add(new THREE.Vector3(
-      (Math.random() - .5) * spread, (Math.random() - .5) * spread * .4, (Math.random() - .5) * spread
-    )).normalize();
-    const sp = (4.5 + Math.random() * 5.0) * intensity;
-    jetPuffs.spawn(p.x, p.y, p.z, d.x * sp, d.y * sp, d.z * sp,
-      0.55 + Math.random() * 0.5, 0.22 + Math.random() * 0.18, 0.9 + Math.random() * 0.8);
-  }
-}
-function emitPulse(dt, intensity) {
-  if (intensity <= 0.01) return;
-  const n = Math.min(9, Math.floor(intensity * 62 * dt + Math.random()));
-  for (let i = 0; i < n; i++) {
-    car.updateMatrixWorld();
-    const side = Math.random() < .5 ? -1 : 1;
-    const p = new THREE.Vector3(0.1, -0.2, side * 0.55);
-    p.applyMatrix4(car.matrixWorld);
-    const dir = new THREE.Vector3(0, 0, side).applyQuaternion(car.quaternion);
-    const d = dir.clone().add(new THREE.Vector3(
-      (Math.random() - .5) * .5, (Math.random() - .5) * .5, (Math.random() - .5) * .5)).normalize();
-    const sp = (4.0 + Math.random() * 4.5) * intensity;
-    pulsePuffs.spawn(p.x, p.y, p.z, d.x * sp, d.y * sp, d.z * sp,
-      0.30 + Math.random() * 0.32, 0.20 + Math.random() * 0.16, 0.8 + Math.random() * 0.7);
-  }
-}
+// 旧的"从固定车身点朝固定局部 -Y 喷"已移除 —— 改由 NOZZLE 驱动：
+// 每个喷口有自己的安装位置与轴线，世界坐标经车辆当前变换求得。
+// 车倒挂时局部 -Y 在世界空间朝上，喷射方向自然反转（与原视频一致）。
+function emitJet(dt, intensity) { /* 由 emitFromNozzles 取代 */ }
+function emitPulse(dt, intensity) { /* 由 emitFromNozzles 取代 */ }
 function emitMist(dt, intensity) {
   if (intensity <= 0.01) return;
   const n = Math.min(11, Math.floor(intensity * 68 * dt + Math.random()));
   for (let i = 0; i < n; i++) {
     car.updateMatrixWorld();
-    const p = new THREE.Vector3((Math.random() - .5) * 2.6, -0.52, (Math.random() - .5) * 1.1);
+    const p = new THREE.Vector3((Math.random() - .5) * 2.6, 0.34, (Math.random() - .5) * 1.1);
     p.applyMatrix4(car.matrixWorld);
     // 底部高压白雾：贴地铺开、缓慢外扩
     const sp = 3.4 + Math.random() * 4.2;
@@ -1128,19 +1571,55 @@ function frame(now) {
   if (s.susp && ph === 'landed') car.position.y += s.susp * 0.35;
 
   // ---- 灯光与特效 ----
-  const jetI = (ph === 'descent' || ph === 'roll') ? 0.95 : (ph === 'cushion' ? 1.0 : 0);
+  // ---- 喷口系统：由阶段驱动各喷口强度, 粒子严格从喷口位置沿喷口轴线喷出 ----
+  car.updateMatrixWorld();
   const pulseI = s.pulse;
+  // ---- 阶段强度 (依据原视频 C 形坡道段 19.6-23.3s) ----
+  // hang    : 倒挂保持, 车顶侧已有 2 条蓝色光束 (19.6-20.0s)   —— 中等强度
+  // descent : 脱轨下落, 4 条平行光束朝下 (20.4-22.0s)          —— 全功率
+  // roll    : 空中翻正, 光束持续 + 左右姿态喷气 (22.0-23.0s)   —— 全功率
+  // cushion : 接近地面, 车底向下缓降 (22.5-23.3s)              —— 全功率
+  const phaseIntensity =
+      ph === 'descent' || ph === 'roll' ? 0.95
+    : ph === 'cushion'                  ? 1.00
+    : ph === 'hang'                     ? 0.60
+    : 0;
+  updateNozzles(ph, ph === 'roll' ? Math.max(phaseIntensity, pulseI) : phaseIntensity);
+  for (const n of nozzles) {
+    n.update(car.matrixWorld, car.quaternion);
+    if (n.stream) {
+      n.stream.userData.mat.uniforms.uTime.value = nowS;
+      // 锥体在车体局部, 方向由 localDir 固定; 长度随强度轻微伸缩
+      const k = 0.55 + n.intensity * 0.55;
+      n.stream.scale.set(
+        (n.type === 'attitude' ? 1.9 : 1) * k,
+        (n.type === 'attitude' ? 0.30 : 1) * k,
+        (n.type === 'attitude' ? 1.9 : 1) * k
+      );
+    }
+  }
+  emitFromNozzles(dt, car, jetPuffs, pulsePuffs);
   const mistI = s.mist;
-  emitJet(dt, jetI);
-  emitPulse(dt, pulseI);
   emitMist(dt, mistI * 0.9 + (ph === 'landed' ? Math.max(0, s.mist) * 0.5 : 0));
 
-  jetLight.position.set(car.position.x, car.position.y - 2.6, car.position.z);
-  jetLight.intensity = jetI * 7 + pulseI * 6;
+  // 喷口辉光: 取所有激活喷口的世界位置做加权平均
+  let nAcc = 0, nX = 0, nY = 0, nZ = 0, nMax = 0;
+  for (const n of nozzles) {
+    if (n.intensity <= 0.02) continue;
+    nAcc += n.intensity; nX += n.worldPos.x * n.intensity;
+    nY += n.worldPos.y * n.intensity; nZ += n.worldPos.z * n.intensity;
+    if (n.intensity > nMax) nMax = n.intensity;
+  }
+  if (nAcc > 0.001) {
+    jetLight.position.set(nX / nAcc, nY / nAcc, nZ / nAcc);
+  } else {
+    jetLight.position.set(car.position.x, car.position.y - 2.6, car.position.z);
+  }
+  jetLight.intensity = nMax * 4.2 + pulseI * 3.4;
   jetLight.distance = 46;
   // 喷口方向的柔和补光：照亮车底而非整个车身
   jetFill.position.set(car.position.x, car.position.y - 6, car.position.z + 3);
-  jetFill.intensity = jetI * 0.28;
+  jetFill.intensity = phaseIntensity * 0.28;
   jetFill.target.position.copy(car.position);
 
   // 跟车补光：从【相机侧】打过来，保证任何姿态下车身都有可读细节。
