@@ -994,6 +994,13 @@ function bodyBaseZ(x, y) {
 // 玻璃嵌进这个凹陷里, 两侧留白色肩线 -> 侧视时那道【暗影凹槽】就是厚度信号。
 const GLASS_DROP = 0.105;
 
+// 【B 柱 / 中柱】x 位置与半宽。
+// 车身顶盖在这个 x 附近不下沉, 形成一根横梁, 把车顶分成前后两块风挡。
+// 加上两侧的 A 柱(前风挡前沿)与 C 柱(后风挡后沿, 都是车身肩线自带),
+// 组成四支柱拱形结构 —— 这是"车身有刚性"的关键读感。
+const B_PILLAR_X = 0.10;
+const B_PILLAR_HW = 0.072;   // B 柱沿 x 的半宽
+
 const FENDER_BULGE = [
   { cx: -1.30, amp: 0.082, w: 0.66 },   // 前翼子板
   { cx:  1.38, amp: 0.112, w: 0.72 },   // 后翼子板(更饱满)
@@ -1080,6 +1087,7 @@ function buildBodyShell() {
       let y = yBot + (yTop - yBot) * tw;
       // 顶盖下沉: 玻璃区内 tw>0.55 的部分整体下压, 越靠中心越深
       //   => 车身顶盖变成一个【开口】, 玻璃装在里面, 两侧留白色肩线
+      //
       if (inGlass && tw > 0.55) {
         const k = (tw - 0.55) / 0.45;              // 0..1
         y -= GLASS_DROP * k;
@@ -1144,6 +1152,70 @@ function buildBodyShell() {
 
 /** 车顶全景玻璃：独立的深色壳，贴在车身顶盖上方 */
 /**
+ * 【B 柱 / 中柱横梁】—— 独立的车身结构件, 横跨车顶宽度。
+ *
+ * 四支柱结构: A柱(前风挡前沿) + B柱(中梁) + C柱(后风挡后沿),
+ * 夹住前后两块风挡。真实 Roadster 2 的车顶是"双圆顶 + 中柱"。
+ *
+ * 这根梁不是"让顶盖不下沉"实现的(那样只是一条窄脊),
+ * 而是一根真正架在两个开口之间的【实体拱梁】:
+ *   - 沿 x 有宽度(B_PILLAR_HW)
+ *   - 沿 z 横跨整个车顶
+ *   - 顶部与车身肩线齐平, 底部形成一道拱形暗影
+ */
+function buildBPillar() {
+  const pos = [], uv = [], idx = [];
+  const yTopAt = (x) => {
+    // 取该 x 处车身的 yTop
+    const S = BODY_SECTIONS;
+    let i = 0;
+    while (i < S.length - 2 && S[i + 1][0] < x) i++;
+    const a = S[i], b = S[i + 1];
+    const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+    return a[1] + (b[1] - a[1]) * t;
+  };
+  const hwAt = (x) => {
+    const S = BODY_SECTIONS;
+    let i = 0;
+    while (i < S.length - 2 && S[i + 1][0] < x) i++;
+    const a = S[i], b = S[i + 1];
+    const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+    return a[3] + (b[3] - a[3]) * t;
+  };
+
+  const M = 13;                 // 沿 z 的采样数
+  const xs = [B_PILLAR_X - B_PILLAR_HW, B_PILLAR_X + B_PILLAR_HW];
+  const drop = GLASS_DROP * 0.72;   // 梁底比玻璃边缘浅一些(梁有拱高)
+  const base = pos.length / 3;
+  for (let k = 0; k < xs.length; k++) {
+    const x = xs[k];
+    const yTop = yTopAt(x), hw = hwAt(x);
+    for (let j = 0; j < M; j++) {
+      const u = j / (M - 1);
+      const a = -Math.PI / 2 + u * Math.PI;
+      const s = -Math.sin(a);
+      const z = s * hw * 0.94;                       // 横跨车顶宽度
+      // 拱形: 中间(车顶中线)最高, 往两侧落到开口边缘 —— 读起来是"梁"不是"板"
+      const arch = Math.cos(a);                        // 1 .. -1
+      const y = yTop - drop * (1 - arch * 0.5) * 0.62;
+      pos.push(x, y, z);
+      uv.push(k, u);
+    }
+  }
+  // 顶面
+  for (let j = 0; j < M - 1; j++) {
+    const a = base + j, b = a + 1, c = base + M + j, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
  * 车顶玻璃的【实体裙边 / 密封框】—— 沿玻璃左右边缘向下的窄带。
  * 侧视时能看到玻璃有厚度, 而不是一张纸片; 同时与车身形成一道暗色凹槽。
  */
@@ -1154,20 +1226,34 @@ function buildGlassRim() {
     if (s[0] >= GLASS_X0 && s[0] <= GLASS_X1) segs.push(s);
   }
   const RIB = 0.030;
-  for (const sgn of [-1, 1]) {
-    const start = pos.length / 3;
-    for (let i = 0; i < segs.length; i++) {
-      const [px, yTop, yBot, hw] = segs[i];
-      const edgeY = yTop - GLASS_SINK;
-      const z = sgn * hw * GLASS_W;
-      pos.push(px, edgeY, z);                 // 上缘(与玻璃面对齐)
-      pos.push(px, edgeY - RIB, z);            // 下缘(向下的实体侧壁)
-      uv.push(0, i / (segs.length - 1), 1, i / (segs.length - 1));
+  // 同样在 B 柱处断开, 保证玻璃面与裙边的断口对齐
+  const runs = [];
+  {
+    let cur = null;
+    for (const sec of segs) {
+      const [px] = sec;
+      if (Math.abs(px - B_PILLAR_X) < B_PILLAR_HW) { cur = null; continue; }
+      if (!cur) { cur = { segs: [] }; runs.push(cur); }
+      cur.segs.push(sec);
     }
-    for (let i = 0; i < segs.length - 1; i++) {
-      const a = start + i * 2, b = a + 1, c = a + 2, d = a + 3;
-      if (sgn > 0) idx.push(a, c, b, b, c, d);
-      else idx.push(a, b, c, b, d, c);
+  }
+  const validRuns = runs.filter(r => r.segs.length >= 2);
+  for (const sgn of [-1, 1]) {
+    for (const run of validRuns) {
+      const start = pos.length / 3;
+      for (let i = 0; i < run.segs.length; i++) {
+        const [px, yTop, yBot, hw] = run.segs[i];
+        const edgeY = yTop - GLASS_SINK;
+        const z = sgn * hw * GLASS_W;
+        pos.push(px, edgeY, z);                 // 上缘(与玻璃面对齐)
+        pos.push(px, edgeY - RIB, z);            // 下缘(向下的实体侧壁)
+        uv.push(0, i / (run.segs.length - 1), 1, i / (run.segs.length - 1));
+      }
+      for (let i = 0; i < run.segs.length - 1; i++) {
+        const a = start + i * 2, b = a + 1, c = a + 2, d = a + 3;
+        if (sgn > 0) idx.push(a, c, b, b, c, d);
+        else idx.push(a, b, c, b, d, c);
+      }
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -1208,25 +1294,47 @@ function buildGlassCanopy() {
   // 每个截面 6 个点: 上表面 3 点(左/中/右) + 下裙边 3 点 —— 侧壁是实体, 有厚度。
   const N = 15;
   const RIB = 0.026;   // 裙边厚度(垂直向下)
-  for (let i = 0; i < segs.length; i++) {
-    const [px, yTop, yBot, hw] = segs[i];
-    const edgeY = yTop - GLASS_SINK;                 // 边缘: 下沉
-    const halfW = hw * GLASS_W;
-    for (let j = 0; j < N; j++) {
-      const u = j / (N - 1);
-      const a = -Math.PI / 2 + u * Math.PI;          // -PI/2 .. +PI/2
-      const s = -Math.sin(a);                        // -1 .. 1
-      const z = s * halfW;
-      const y = edgeY + Math.cos(a) * GLASS_RISE;    // 拱形: 中间高, 两侧落到 edgeY
-      pos.push(px, y, z);                            // 上表面
-      uv.push(u, i / (segs.length - 1));
+
+  // 【B 柱处断开】玻璃分成前后两块(前风挡 / 后风挡), 中间留出 B 柱横梁。
+  // 四支柱结构: A柱(车身) + B柱(横梁) + C柱(车身) 夹住两块风挡。
+  // 玻璃面与裙边都按同样规则分段, 保证 B 柱位置是干净的断口。
+  const runs = [];
+  {
+    // 找出玻璃区内的 section, 按 B 柱切成若干段
+    let cur = null;
+    for (const sec of segs) {
+      const [px] = sec;
+      const overPillar = Math.abs(px - B_PILLAR_X) < B_PILLAR_HW;
+      if (overPillar) { cur = null; continue; }       // B 柱处断开
+      if (!cur) { cur = { segs: [] }; runs.push(cur); }
+      cur.segs.push(sec);
     }
   }
-  for (let i = 0; i < segs.length - 1; i++)
-    for (let j = 0; j < N - 1; j++) {
-      const a = i * N + j, b = a + 1, c = a + N, d = c + 1;
-      idx.push(a, c, b, b, c, d);
+  // 段内不足 2 个 section 就没法成面, 丢弃
+  const validRuns = runs.filter(r => r.segs.length >= 2);
+
+  for (const run of validRuns) {
+    const base = pos.length / 3;
+    for (let i = 0; i < run.segs.length; i++) {
+      const [px, yTop, yBot, hw] = run.segs[i];
+      const edgeY = yTop - GLASS_SINK;                 // 边缘: 下沉
+      const halfW = hw * GLASS_W;
+      for (let j = 0; j < N; j++) {
+        const u = j / (N - 1);
+        const a = -Math.PI / 2 + u * Math.PI;          // -PI/2 .. +PI/2
+        const s = -Math.sin(a);                        // -1 .. 1
+        const z = s * halfW;
+        const y = edgeY + Math.cos(a) * GLASS_RISE;    // 拱形: 中间高, 两侧落到 edgeY
+        pos.push(px, y, z);                            // 上表面
+        uv.push(u, i / (run.segs.length - 1));
+      }
     }
+    for (let i = 0; i < run.segs.length - 1; i++)
+      for (let j = 0; j < N - 1; j++) {
+        const a = base + i * N + j, b = a + 1, c = a + N, d = c + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+  }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -1297,6 +1405,15 @@ function buildCar() {
   const canopyRim = new THREE.Mesh(buildGlassRim(), darkTrim);
   canopyRim.castShadow = true;
   g.add(canopyRim);
+  // 【B 柱横梁】—— 四支柱结构的中柱, 架在前后两块风挡之间。
+  // 用比车身稍暗的漆, 避免抢过玻璃的视觉重心(支柱是结构, 不是主角)
+  const pillarPaint = new THREE.MeshPhysicalMaterial({
+    color: 0xa8b4c2, roughness: 0.44, metalness: 0.06,
+    clearcoat: 0.42, clearcoatRoughness: 0.18, envMapIntensity: 0.86,
+  });
+  const bPillar = new THREE.Mesh(buildBPillar(), pillarPaint);
+  bPillar.castShadow = true;
+  g.add(bPillar);
   // 【座舱内衬】车顶开口下面的一层深色内衬。
   // 车身顶盖在玻璃区下沉成开口后, 车底的磁吸盘(y=0.395)会从开口直接暴露;
   // 真实车隔着天幕是看不到底盘的 —— 这里铺一层内衬把视线堵住。
@@ -1308,16 +1425,21 @@ function buildCar() {
     //   - 井底: 水平深色板
     //   - 井壁: 沿开口四周向下的垂直壁
     // 有壁才有"深"的读感, 单纯一块板仍会看到底盘。
-    const wx = 1.40, wz = 0.98, depth = 0.46, wallY = 0.845;
-    const floor = new THREE.Mesh(new THREE.BoxGeometry(wx, 0.02, wz), darkTrim);
-    floor.position.set(0.08, wallY - depth, 0);
-    g.add(floor);
-    // 四面井壁
-    for (const [sx, sz, w, d] of [[0, wz/2, wx, 0.02], [0, -wz/2, wx, 0.02],
-                                  [wx/2, 0, 0.02, wz], [-wx/2, 0, 0.02, wz]]) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), darkTrim);
-      wall.position.set(0.08 + sx, wallY - depth/2, sz);
-      g.add(wall);
+    // 两块风挡各配一块内衬, 中间给 B 柱让位(否则 B 柱会被内衬遮住)
+    const wz = 0.98, depth = 0.30, wallY = 0.845;
+    for (const [cx, cw] of [[-0.26, 0.66], [0.50, 0.52]]) {
+      const floor = new THREE.Mesh(new THREE.BoxGeometry(cw, 0.02, wz), darkTrim);
+      floor.position.set(cx, wallY - depth + 0.04, 0);
+      g.add(floor);
+    }
+    // 四面井壁(同样分两块, 中间留 B 柱位置)
+    for (const [cx, cw] of [[-0.26, 0.66], [0.50, 0.52]]) {
+      for (const [sx, sz, w, d] of [[0, wz/2, cw, 0.02], [0, -wz/2, cw, 0.02],
+                                    [cw/2, 0, 0.02, wz], [-cw/2, 0, 0.02, wz]]) {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), darkTrim);
+        wall.position.set(cx + sx, wallY - depth/2, sz);
+        g.add(wall);
+      }
     }
   }
 
