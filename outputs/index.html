@@ -1187,10 +1187,18 @@ function buildCar() {
     color: 0xbcc6d2, roughness: 0.40, metalness: 0.06,
     clearcoat: 0.45, clearcoatRoughness: 0.16, envMapIntensity: 0.85,
   });
+  // 【车顶玻璃】深色镀膜天幕 —— 从外面看是一整块深色玻璃, 看不穿车内。
+  //
+  // 【本轮修正】旧参数 transmission:0.18 + opacity:0.86 看起来"90%透明",
+  //   根因: transmission 是【物理透射】, 它会绕过 opacity 继续透光。
+  //   只降 opacity 没用(实测 0.35/0.25 反而让车顶发白, 因为半透时只剩反射),
+  //   必须 transmission = 0 才真正不透光。
+  // opacity 保持 1.0(完全不透明): 真实全景天幕从外面看就是黑的。
+  // A/B 实测: tr=0 + op=1.0 车顶变成实心深色块, 完全看不穿。
   const glass = new THREE.MeshPhysicalMaterial({
-    color: 0x0b1219, roughness: 0.10, metalness: 0.45,
-    transmission: 0.18, thickness: 0.20, transparent: true, opacity: 0.86,
-    ior: 1.5, envMapIntensity: 0.95,
+    color: 0x0a1017, roughness: 0.08, metalness: 0.55,
+    transmission: 0.0, thickness: 0.20, transparent: false, opacity: 1.0,
+    ior: 1.5, envMapIntensity: 1.05,
   });
   const darkTrim = new THREE.MeshStandardMaterial({
     color: 0x0b0e13, roughness: 0.40, metalness: 0.75, envMapIntensity: 1.1,
@@ -1345,16 +1353,18 @@ function buildCar() {
       g.add(core);
     }
     // 磁吸盘
-    const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.05, 26), darkTrim);
+    // 半径 0.78 -> 0.44: 车身底板下探后磁吸盘被包在车壳内,
+    // 半径超过车顶玻璃覆盖范围(半宽 0.497)就会从顶视穿帮露出来
+    const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.44, 0.05, 26), darkTrim);
     magPad.position.set(0.10, 0.395, 0);   // 磁吸贴合面, 必须保持 0.385 基准
     g.add(magPad);
-    magRing = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.042, 8, 34),
+    magRing = new THREE.Mesh(new THREE.TorusGeometry(0.44, 0.036, 8, 30),
       new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.75, toneMapped: false }));
     magRing.rotation.x = Math.PI / 2;
     magRing.position.set(0.10, 0.372, 0);   // 同上
     g.add(magRing);
     for (let k = 0; k < 3; k++) {
-      const c = new THREE.Mesh(new THREE.TorusGeometry(0.28 + k * 0.20, 0.015, 6, 26),
+      const c = new THREE.Mesh(new THREE.TorusGeometry(0.16 + k * 0.11, 0.013, 6, 24),
         new THREE.MeshBasicMaterial({ color: 0x174f68, transparent: true, opacity: 0.4, toneMapped: false }));
       c.rotation.x = Math.PI / 2;
       c.position.set(0.10, 0.368, 0);
