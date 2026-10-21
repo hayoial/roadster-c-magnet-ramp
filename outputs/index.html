@@ -990,6 +990,10 @@ function bodyBaseZ(x, y) {
 // 车轮看起来是"插进"壳子而非"陷在翼子板里" —— 斜侧看车身下半部镂空, 像薄毯子。
 // 这里在前后轮拱处让车身向外鼓, 罩住轮胎外缘, 形成 Roadster 的翼子板造型。
 // 高度权重: 只作用在腰线以下到腰线(tw 0.05~0.60), 车顶不受影响。
+// 【车顶凹陷】玻璃覆盖区的车身顶盖下沉量。
+// 玻璃嵌进这个凹陷里, 两侧留白色肩线 -> 侧视时那道【暗影凹槽】就是厚度信号。
+const GLASS_DROP = 0.105;
+
 const FENDER_BULGE = [
   { cx: -1.30, amp: 0.082, w: 0.66 },   // 前翼子板
   { cx:  1.38, amp: 0.112, w: 0.72 },   // 后翼子板(更饱满)
@@ -1069,9 +1073,17 @@ function buildBodyShell() {
     // 顶盖在座舱区更拱: 用拱高系数
     // 顶盖拱高加大 -> 座舱有鼓起的体积感, 消除扁平感
     const arch = 0.105 * Math.sin(Math.PI * Math.max(0, Math.min(1, (px + 1.1) / 2.6)));
+    // 玻璃覆盖区: 顶盖下沉, 形成开口
+    const inGlass = px >= GLASS_X0 && px <= GLASS_X1;
     for (let j = 0; j < RN; j++) {
       const [tw, wf, sign] = RING_FULL[j];
-      const y = yBot + (yTop - yBot) * tw;
+      let y = yBot + (yTop - yBot) * tw;
+      // 顶盖下沉: 玻璃区内 tw>0.55 的部分整体下压, 越靠中心越深
+      //   => 车身顶盖变成一个【开口】, 玻璃装在里面, 两侧留白色肩线
+      if (inGlass && tw > 0.55) {
+        const k = (tw - 0.55) / 0.45;              // 0..1
+        y -= GLASS_DROP * k;
+      }
       // 翼子板隆起: 轮拱处向外鼓, 罩住轮胎外缘
       const z = (hw + fenderBulge(px, tw)) * wf * sign;   // ← 左侧取负, 完整对称截面
       pos.push(px, y + (tw > 0.8 ? arch * (tw - 0.8) / 0.2 : 0), z);
@@ -1131,6 +1143,58 @@ function buildBodyShell() {
 }
 
 /** 车顶全景玻璃：独立的深色壳，贴在车身顶盖上方 */
+/**
+ * 车顶玻璃的【实体裙边 / 密封框】—— 沿玻璃左右边缘向下的窄带。
+ * 侧视时能看到玻璃有厚度, 而不是一张纸片; 同时与车身形成一道暗色凹槽。
+ */
+function buildGlassRim() {
+  const pos = [], uv = [], idx = [];
+  const segs = [];
+  for (const s of BODY_SECTIONS) {
+    if (s[0] >= GLASS_X0 && s[0] <= GLASS_X1) segs.push(s);
+  }
+  const RIB = 0.030;
+  for (const sgn of [-1, 1]) {
+    const start = pos.length / 3;
+    for (let i = 0; i < segs.length; i++) {
+      const [px, yTop, yBot, hw] = segs[i];
+      const edgeY = yTop - GLASS_SINK;
+      const z = sgn * hw * GLASS_W;
+      pos.push(px, edgeY, z);                 // 上缘(与玻璃面对齐)
+      pos.push(px, edgeY - RIB, z);            // 下缘(向下的实体侧壁)
+      uv.push(0, i / (segs.length - 1), 1, i / (segs.length - 1));
+    }
+    for (let i = 0; i < segs.length - 1; i++) {
+      const a = start + i * 2, b = a + 1, c = a + 2, d = a + 3;
+      if (sgn > 0) idx.push(a, c, b, b, c, d);
+      else idx.push(a, b, c, b, d, c);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * 车顶全景天幕 —— 【嵌入式】玻璃, 不是浮在车顶的一片薄膜。
+ *
+ * 【本轮修正】旧版玻璃三处都读不出厚度:
+ *   1. 边缘 y == yTop(车身最高点) -> 与车身齐平, 没有下沉感
+ *   2. 半宽 hw*0.50 > 车身肩部(tw0.96 的 0.470) -> 边缘悬在车壳外
+ *   3. 单层面片无侧壁 -> 侧视看不到玻璃截面, 永远读不出厚度
+ *
+ * 现在:
+ *   - 玻璃整体【下沉】SINK, 边缘低于车身肩线 -> 形成一道凹槽暗影(最强的厚度信号)
+ *   - 玻璃边缘有【实体侧壁】(向下的裙边) -> 侧视能看到一条有厚度的边
+ *   - 四周留出【密封框】, 由车身顶盖本身形成
+ */
+const GLASS_SINK = 0.088;     // 玻璃边缘相对 yTop 下沉量(坐在车身开口里)
+const GLASS_W = 0.46;         // 玻璃半宽系数(车身肩部 0.470, 留出细框)
+const GLASS_RISE = 0.030;     // 玻璃中脊比边缘高多少
+
 function buildGlassCanopy() {
   const pos = [], uv = [], idx = [];
   const segs = [];
@@ -1140,15 +1204,21 @@ function buildGlassCanopy() {
   // 环绕采样: a 从 -PI/2 走到 +PI/2, z = -sin(a) 覆盖 [-hw, +hw] 全宽。
   // 【根因修复】旧版用 -cos(a) 而 a∈[-PI/2,PI/2] => cos 恒正 => 只生成 -Z 半边,
   // 表现为车顶一块单侧黑色矩形, 运动中随视角忽隐忽现。
+  //
+  // 每个截面 6 个点: 上表面 3 点(左/中/右) + 下裙边 3 点 —— 侧壁是实体, 有厚度。
   const N = 15;
+  const RIB = 0.026;   // 裙边厚度(垂直向下)
   for (let i = 0; i < segs.length; i++) {
     const [px, yTop, yBot, hw] = segs[i];
+    const edgeY = yTop - GLASS_SINK;                 // 边缘: 下沉
+    const halfW = hw * GLASS_W;
     for (let j = 0; j < N; j++) {
       const u = j / (N - 1);
-      const a = -Math.PI / 2 + u * Math.PI;      // -PI/2 .. +PI/2
-      const z = -Math.sin(a) * hw * 0.50;        // -hw/2 .. +hw/2 (全宽)
-      const y = yTop + Math.cos(a) * 0.038;      // 拱形: 中间高, 两侧落到 yTop
-      pos.push(px, y, z);
+      const a = -Math.PI / 2 + u * Math.PI;          // -PI/2 .. +PI/2
+      const s = -Math.sin(a);                        // -1 .. 1
+      const z = s * halfW;
+      const y = edgeY + Math.cos(a) * GLASS_RISE;    // 拱形: 中间高, 两侧落到 edgeY
+      pos.push(px, y, z);                            // 上表面
       uv.push(u, i / (segs.length - 1));
     }
   }
@@ -1157,6 +1227,7 @@ function buildGlassCanopy() {
       const a = i * N + j, b = a + 1, c = a + N, d = c + 1;
       idx.push(a, c, b, b, c, d);
     }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
@@ -1222,6 +1293,33 @@ function buildCar() {
   const canopy = new THREE.Mesh(buildGlassCanopy(), glass);
   canopy.castShadow = true;
   g.add(canopy);
+  // 玻璃裙边/密封框 —— 独立深色件, 与玻璃面分开才能读出"厚度"
+  const canopyRim = new THREE.Mesh(buildGlassRim(), darkTrim);
+  canopyRim.castShadow = true;
+  g.add(canopyRim);
+  // 【座舱内衬】车顶开口下面的一层深色内衬。
+  // 车身顶盖在玻璃区下沉成开口后, 车底的磁吸盘(y=0.395)会从开口直接暴露;
+  // 真实车隔着天幕是看不到底盘的 —— 这里铺一层内衬把视线堵住。
+  {
+    // 【座舱内衬】车顶开口下方的深色"井"。
+    //
+    // 车身顶盖在玻璃区下沉成开口后, 视线会一路看到车底(磁吸盘 y=0.395)。
+    // 真实车隔着天幕看不到底盘 —— 这里用一个有【侧壁】的深色井把视线堵死:
+    //   - 井底: 水平深色板
+    //   - 井壁: 沿开口四周向下的垂直壁
+    // 有壁才有"深"的读感, 单纯一块板仍会看到底盘。
+    const wx = 1.40, wz = 0.98, depth = 0.46, wallY = 0.845;
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(wx, 0.02, wz), darkTrim);
+    floor.position.set(0.08, wallY - depth, 0);
+    g.add(floor);
+    // 四面井壁
+    for (const [sx, sz, w, d] of [[0, wz/2, wx, 0.02], [0, -wz/2, wx, 0.02],
+                                  [wx/2, 0, 0.02, wz], [-wx/2, 0, 0.02, wz]]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), darkTrim);
+      wall.position.set(0.08 + sx, wallY - depth/2, sz);
+      g.add(wall);
+    }
+  }
 
   // A 柱 / 车身与玻璃之间的密封条
   {
