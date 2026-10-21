@@ -869,38 +869,115 @@ function buildJetStreams(carGroup) {
 // 车顶最高点 yTop = 1.11 => 座舱区顶盖 1.06~1.11, 腰线 ~0.62, 底板 ~0.30。
 const BODY_SECTIONS = [
   // x,      yTop,   yBot,   halfWidth
-  [-2.210,  0.560,  0.560,  0.640],  // 车鼻前缘 (窄而圆)
-  [-2.140,  0.640,  0.500,  0.790],
-  [-2.000,  0.740,  0.440,  0.895],  // 前保险杠
-  [-1.760,  0.860,  0.400,  0.950],  // 前翼子板隆起
-  [-1.430,  0.935,  0.385,  0.975],  // 前轮拱顶
-  [-1.060,  0.975,  0.390,  0.985],
-  [-0.700,  1.040,  0.400,  0.990],  // 风挡根部
+  // 【车身体量 — 本轮】
+  // 旧版首节 yTop==yBot==0.560, 截面退化成一条线 => 车头是"零厚度尖喙",
+  // 侧视看像鼠标的前尖; 尾部也只剩 0.28m 厚。
+  // 现在首尾都给出真实厚度, 且车头 hw 增长放缓(不再尖长)——
+  // 车顶高度 yTop 一律不动, 低趴跑车比例保留。
+  [-2.210,  0.645,  0.500,  0.700],  // 车鼻前缘 (有厚度的圆头, 不再是纸片尖)
+  [-2.140,  0.690,  0.470,  0.820],
+  [-2.000,  0.765,  0.430,  0.895],  // 前保险杠
+  [-1.760,  0.880,  0.400,  0.955],  // 前翼子板
+  [-1.430,  0.965,  0.385,  0.985],  // 前翼子板隆起 (轮拱顶, 明显拱起)
+  [-1.060,  0.995,  0.390,  0.992],
+  [-0.700,  1.045,  0.400,  0.994],  // 风挡根部
   [-0.280,  1.095,  0.410,  0.995],  // 座舱前
   [ 0.180,  1.110,  0.412,  0.995],  // 座舱中 (车顶最高 = 1.11m)
-  [ 0.560,  1.088,  0.410,  0.985],
-  [ 0.900,  1.030,  0.408,  0.950],  // 车尾玻璃起
-  [ 1.260,  0.975,  0.400,  0.920],  // 后轮拱顶
-  [ 1.620,  0.930,  0.405,  0.895],
-  [ 1.930,  0.890,  0.430,  0.840],  // 尾部收
-  [ 2.130,  0.850,  0.470,  0.730],  // 尾端
-  [ 2.210,  0.800,  0.520,  0.560],  // 尾端面
+  [ 0.560,  1.092,  0.410,  0.992],
+  [ 0.900,  1.040,  0.408,  0.975],  // 车尾玻璃起
+  [ 1.260,  1.000,  0.400,  0.960],  // 后轮拱顶 (后肩: 比座舱只低 0.11m)
+  [ 1.620,  0.955,  0.405,  0.930],  // 后肩延续
+  [ 1.930,  0.910,  0.430,  0.865],  // 尾部收
+  [ 2.130,  0.868,  0.480,  0.760],  // 尾端
+  [ 2.210,  0.830,  0.545,  0.660],  // 尾端面 (有厚度)
 ];
 
 // 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
 const GLASS_X0 = -0.62, GLASS_X1 = 0.78;
 
 const CAR_RING = [
-  [0.00, 0.40],   // 底板中心
-  [0.07, 0.78],   // 底板边缘
-  [0.18, 0.94],   // 下腰
-  [0.34, 1.00],   // 侧腰最宽
-  [0.52, 0.995],  // 上腰线
-  [0.70, 0.94],   // 车顶侧缘
-  [0.86, 0.78],   // 顶盖收窄
-  [0.95, 0.48],   // 顶盖肩
-  [1.00, 0.10],   // 顶盖中心
+  // [高度权重, 半宽系数]
+  // 【车身体量 — 本轮核心修正】
+  // 原 9 点轮廓的问题不是高度, 而是"肉"的位置:
+  //   底板中心 wf 只有 0.40 -> 车身底部是一根 0.4m 宽的窄脊, 两侧全空
+  //   tw 0.18 才到 0.94, tw 0.70 顶盖肩就开始塌
+  //   => 侧腰实心带只有 y 0.538~0.901 (0.363m), 斜侧看车身像一块薄壳
+  // 现在:
+  //   底板 0.40 -> 0.75  底部是实实在在的板, 不是脊
+  //   下腰 tw 0.12 就到 0.975, tw 0.27 (轮胎顶 y=0.60) 已满宽
+  //     => 车身包住轮子上半部, 不再是薄壳悬在轮子上方
+  //   顶盖肩收窄从 tw 0.70 推迟到 0.80
+  // 车顶高度 yTop 一律不动 —— 低趴跑车比例保留
+  // 关键: 底板到满宽的过渡必须【接近垂直】(rocker 侧壁), 不能是大锥面。
+  // 原设计 0.385(y=0.39) -> 0.60(y=0.60) 是 49° 斜切, 3/4 视角下"透"成薄片。
+  // 现在底板 0.88*hw 已经很宽, 0.02 就到 0.96 -> 斜率约 12°, 近乎垂直。
+  [0.00, 0.880],  // 底板 (原 0.40) —— 底部是一整块板
+  [0.02, 0.960],  // 底板外缘 几乎垂直上收
+  [0.10, 0.995],  // 下腰 (原 tw0.18/0.94) 提前到近满宽
+  [0.20, 1.000],  // 侧腰最宽 —— 轮胎顶 y=0.60 落在 tw0.27, 车身包住轮上半
+  [0.45, 1.000],  // 侧腰保持满宽
+  [0.65, 0.985],  // 上腰线 (原 0.94) 保持饱满
+  [0.80, 0.930],  // 车顶侧缘 (原 tw0.70/0.94) 肩部推迟收窄
+  [0.90, 0.760],  // 顶盖收窄
+  [0.96, 0.470],  // 顶盖肩
+  [1.00, 0.100],  // 顶盖中心
 ];
+
+/** 车身半宽(不含翼子板隆起) —— 轮距等基准量用这个 */
+/** 车身底板高度 yBot 在任意 x 处的插值 (与 bodySurfaceZ / bodyBaseZ 同一套 BODY_SECTIONS) */
+function bodyYBotAt(x) {
+  const S = BODY_SECTIONS;
+  let i = 0;
+  while (i < S.length - 2 && S[i + 1][0] < x) i++;
+  const a = S[i], b = S[i + 1];
+  const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+  return a[2] + (b[2] - a[2]) * t;
+}
+
+function bodyBaseZ(x, y) {
+  const S = BODY_SECTIONS;
+  let i = 0;
+  while (i < S.length - 2 && S[i + 1][0] < x) i++;
+  const a = S[i], b = S[i + 1];
+  const t = Math.max(0, Math.min(1, (x - a[0]) / (b[0] - a[0] || 1)));
+  const yTop = a[1] + (b[1] - a[1]) * t;
+  const yBot = a[2] + (b[2] - a[2]) * t;
+  const hw   = a[3] + (b[3] - a[3]) * t;
+  const tw = Math.max(0, Math.min(1, (y - yBot) / (yTop - yBot || 1)));
+  const R = CAR_RING;
+  let wf = R[0][1];
+  for (let k = 0; k < R.length - 1; k++) {
+    if (tw >= R[k][0] && tw <= R[k + 1][0]) {
+      const u = (tw - R[k][0]) / (R[k + 1][0] - R[k][0] || 1);
+      wf = R[k][1] + (R[k + 1][1] - R[k][1]) * u;
+      break;
+    }
+  }
+  if (tw > R[R.length - 1][0]) wf = R[R.length - 1][1];
+  return hw * wf;
+}
+
+// 【翼子板隆起 fender bulge】
+// 轮胎内缘会插进车身(轮心 z 0.964, 车身半宽 0.979), 车身在轮拱处没有向外鼓,
+// 车轮看起来是"插进"壳子而非"陷在翼子板里" —— 斜侧看车身下半部镂空, 像薄毯子。
+// 这里在前后轮拱处让车身向外鼓, 罩住轮胎外缘, 形成 Roadster 的翼子板造型。
+// 高度权重: 只作用在腰线以下到腰线(tw 0.05~0.60), 车顶不受影响。
+const FENDER_BULGE = [
+  { cx: -1.30, amp: 0.082, w: 0.66 },   // 前翼子板
+  { cx:  1.38, amp: 0.112, w: 0.72 },   // 后翼子板(更饱满)
+];
+
+function fenderBulge(x, tw) {
+  if (tw < 0.04 || tw > 0.62) return 0;
+  // 高度包络: 从 tw 0.04 升到 0.16 满, 到 0.50 衰减
+  const k = Math.min(1, (tw - 0.04) / 0.12) * Math.min(1, (0.62 - tw) / 0.12);
+  let b = 0;
+  for (const f of FENDER_BULGE) {
+    const d = (x - f.cx) / f.w;
+    b += f.amp * Math.exp(-d * d);
+  }
+  return b * k;
+}
 
 /**
  * 车身主体：沿 X 轴放样 BODY_SECTIONS，生成带倒角腰线的封闭壳体。
@@ -933,7 +1010,7 @@ function bodySurfaceZ(x, y) {
     }
   }
   if (tw > R[R.length - 1][0]) wf = R[R.length - 1][1];
-  return hw * wf;
+  return (hw + fenderBulge(x, tw)) * wf;   // 翼子板隆起(与 buildBodyShell 共用)
 }
 
 // 车身横截面轮廓 (高度权重, 半宽系数) —— 唯一真源。
@@ -961,7 +1038,8 @@ function buildBodyShell() {
     for (let j = 0; j < RN; j++) {
       const [tw, wf, sign] = RING_FULL[j];
       const y = yBot + (yTop - yBot) * tw;
-      const z = hw * wf * sign;          // ← 左侧取负, 这才是完整的对称截面
+      // 翼子板隆起: 轮拱处向外鼓, 罩住轮胎外缘
+      const z = (hw + fenderBulge(px, tw)) * wf * sign;   // ← 左侧取负, 完整对称截面
       pos.push(px, y + (tw > 0.8 ? arch * (tw - 0.8) / 0.2 : 0), z);
       uv.push(j / (RN - 1), i / (BODY_SECTIONS.length - 1));
     }
@@ -1124,12 +1202,20 @@ function buildCar() {
 
   // ---- 侧面：腰线 / 侧裙 / 轮拱 ----
   // 轮距由体表决定: 轮拱开口略高于体表最宽处, 使轮眉与翼子板齐平
-  const WHEEL_Z = bodySurfaceZ(-1.30, 0.60) * 0.985;
+  // 轮距用【不含翼子板隆起】的基础半宽 —— 否则 bulge 会把轮子一起顶出去,
+  // 车身罩不住轮胎。轮心略内收, 让车身鼓出的翼子板正好盖住轮胎外缘。
+  const WHEEL_Z = bodyBaseZ(-1.30, 0.60) * 0.965;
   for (const sgn of [-1, 1]) {
-    // 侧裙
-    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.10, 0.055, 0.055), darkTrim);
-    skirt.position.set(0.05, 0.445, sgn * (bodySurfaceZ(0.05, 0.445) - 0.012));
-    g.add(skirt);
+    // 侧裙 / 下包围 —— 深色饰条, 贴在车身下沿外侧。
+    // 这是"车身下沿有明确边界"的关键: 斜侧看时, 一条深色的厚边把
+    // 白色车身和黑色车轮分开, 车身就不再像一张盖在轮子上的白毯子。
+    // 高度必须高于 magContact(0.385), 否则会插进坡道。
+    {
+      const sy = bodyYBotAt(0.05) + 0.070;
+      const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.16, 0.105, 0.060), darkTrim);
+      skirt.position.set(0.05, sy, sgn * (bodySurfaceZ(0.05, sy) + 0.004));
+      g.add(skirt);
+    }
     // 前翼子板上的侧向进气
     const intake = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.10, 0.05), darkTrim);
     intake.position.set(-1.12, 0.560, sgn * (bodySurfaceZ(-1.12, 0.560) - 0.010));
@@ -1142,9 +1228,12 @@ function buildCar() {
     const cap = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.060, 0.16), chrome);
     cap.position.set(-0.62, 0.790, sgn * (bodySurfaceZ(-0.62, 0.780) + 0.055));
     g.add(cap);
-    // 轮拱
-    g.add(buildWheelArch(-1.30, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
-    g.add(buildWheelArch(1.38, sgn * WHEEL_Z, 0.330, 0.22, darkTrim));
+    // 轮拱 —— z 跟���身鼓出的翼子板对齐(用 bodySurfaceZ 含 bulge),
+    // 否则轮眉会陷进车身, 看起来像浮在轮子上的一圈黑环。
+    // 轮眉: 落在胎面外缘外侧一点点 —— 刚好在翼子板鼓出的边缘,
+    // 既不会浮在空中, 也不会被轮胎完全埋掉看不见。
+    g.add(buildWheelArch(-1.30, sgn * (bodySurfaceZ(-1.30, 0.60) - 0.004), 0.330, 0.22, darkTrim));
+    g.add(buildWheelArch(1.38, sgn * (bodySurfaceZ(1.38, 0.60) - 0.004), 0.330, 0.22, darkTrim));
   }
 
   // ---- 车轮：Roadster 大轮毂 + 细辐条 ----
@@ -1224,6 +1313,7 @@ scene.add(car);
 window.__scene__ = scene;
 window.__car__ = car;
 window.__camObj__ = camera;
+window.__THREE__ = THREE;   // 供测试工具构造独立检查相机
 window.__rendererInfo__ = () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, frame: renderer.info.render.frame });
 window.__contextLost__ = () => renderer.getContext().isContextLost();
 // 原始喷口配置(供 tests/nozzles.test.mjs 读取阶段与局部轴线)
@@ -1938,6 +2028,13 @@ function frame(now) {
   const targetFov = V.fov;
   camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 3);
   camera.updateProjectionMatrix();
+  // 调试钩子: 外部指定相机时接管(供 tests/car-inspect.mjs 检查车身体量)
+  if (window.__overrideCam__) {
+    camera.position.copy(window.__overrideCam__.position);
+    camera.quaternion.copy(window.__overrideCam__.quaternion);
+    camera.fov = window.__overrideCam__.fov;
+    camera.updateProjectionMatrix();
+  }
 
   // ---- 粒子更新 ----
   jetPuffs.update(dt, camera); mistPuffs.update(dt, camera); pulsePuffs.update(dt, camera);
