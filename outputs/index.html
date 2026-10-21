@@ -908,6 +908,17 @@ const CAR_RING = [
   //     => 车身包住轮子上半部, 不再是薄壳悬在轮子上方
   //   顶盖肩收窄从 tw 0.70 推迟到 0.80
   // 车顶高度 yTop 一律不动 —— 低趴跑车比例保留
+  // 【本轮修正】末点必须是【中心线上的点】(wf=0)。
+  // RING_FULL 的镜像逻辑是 "右半边 + 左半边镜像, 跳过首尾两点",
+  // 这隐含前提: 首尾两点都在 z=0 的中心线上, 环靠它们闭合。
+  // 旧版末点 wf=0.100 -> 顶盖没被镜像, 左右两半在顶部被一条
+  // 从 z=+0.10*hw 到 z=-0.47*hw 的斜切面连起来 => 车顶中线偏了约 0.1m。
+  // 现在末点 wf=0, 顶盖左右自然闭合到中心线上的一点。
+  //
+  // 首点(底板) wf=0.880 保持非零是【有意为之】:
+  // 底板首末两点靠环的收尾连边连成完整横向面, 底部因此是实心的板,
+  // 而不是一根窄脊 —— 这正是本轮要保留的车身体量。
+  //
   // 关键: 底板到满宽的过渡必须【接近垂直】(rocker 侧壁), 不能是大锥面。
   // 原设计 0.385(y=0.39) -> 0.60(y=0.60) 是 49° 斜切, 3/4 视角下"透"成薄片。
   // 现在底板 0.88*hw 已经很宽, 0.02 就到 0.96 -> 斜率约 12°, 近乎垂直。
@@ -920,7 +931,7 @@ const CAR_RING = [
   [0.80, 0.930],  // 车顶侧缘 (原 tw0.70/0.94) 肩部推迟收窄
   [0.90, 0.760],  // 顶盖收窄
   [0.96, 0.470],  // 顶盖肩
-  [1.00, 0.100],  // 顶盖中心
+  [1.00, 0.000],  // 顶盖中心 —— 必须在中心线(z=0)
 ];
 
 /** 车身半宽(不含翼子板隆起) —— 轮距等基准量用这个 */
@@ -1022,12 +1033,18 @@ function buildBodyShell() {
   // [高度权重, 半宽系数] —— 只描述【右半边】, 左半边由镜像生成。
   // 索引 0 = 底板中心, 索引 6 = 顶盖中心。
   const RING = CAR_RING;
-  const HALF = RING.length;                 // 9
+  const HALF = RING.length;                 // 10
   // 完整环: 右半边(0..HALF-1) + 左半边镜像(不含两端中心点)
   const RING_FULL = [];
   for (let j = 0; j < HALF; j++) RING_FULL.push([RING[j][0],  RING[j][1],  1]);
-  for (let j = HALF - 2; j >= 1; j--) RING_FULL.push([RING[j][0], RING[j][1], -1]);
-  const RN = RING_FULL.length;              // 12
+  for (let j = HALF - 2; j >= 0; j--) RING_FULL.push([RING[j][0],  RING[j][1], -1]);
+  const RN = RING_FULL.length;              // 19
+  //
+  // 【本轮修正】镜像循环从 j>=1 改为 j>=0, 即 RING[0] 也成对出现。
+  // 旧写法跳过 RING[0]: 环首 = RING[0](+1, wf=0.880) 而环末 = RING[1](-1, wf=0.960),
+  // 底板横向面从 z=+0.880*hw 连到 z=-0.960*hw —— 左右不等宽, 车底不对称。
+  // 现在环首 = RING[0](+1) 与环末 = RING[0](-1) 严格成对, 底板是左右对称的整块面。
+  // 环中点(RING[9], wf=0) 位于中心线, 左右两半在那里自然汇合。
   const pos = [], uv = [], idx = [];
 
   for (let i = 0; i < BODY_SECTIONS.length; i++) {
@@ -1055,10 +1072,30 @@ function buildBodyShell() {
     }
   }
   // 前后封口
+  // 前后封口 —— 封口点必须放在【截面的实际形心】, 不能硬取 z=0。
+  //
+  // 【本轮修复】CAR_RING 首点 z 系数 0.880、末点 0.100 都非零,
+  // 环上并不存在位于中心线(z=0)的两个端点。旧代码却把封口点直接放在 z=0,
+  // 于是车头/车尾的封口三角面从中心线连到 z=±0.8~0.96 的环点,
+  // 产生一个【左右偏斜的楔形封口】—— 斜侧看车头轮廓不对称。
+  // 现在用环上顶点的 z 加权平均作为封口点 x/y/z, 封口面与截面严格对称。
   const addCap = (ringIdx, flip) => {
-    const s = BODY_SECTIONS[ringIdx];
     const base = pos.length / 3;
-    pos.push(s[0], (s[1] + s[2]) / 2, 0);
+    // 封口点 = 截面多边形的【形心】(shoelace 面积加权), 不是顶点算术平均。
+    // 左右对称的截面形心必落在 z=0 的中心线上, 封口面因此严格对称。
+    let A2 = 0, cy = 0, cz = 0;
+    for (let j = 0; j < RN; j++) {
+      const i0 = ringIdx * RN + j;
+      const i1 = ringIdx * RN + ((j + 1) % RN);
+      const y0 = pos[i0 * 3 + 1], z0 = pos[i0 * 3 + 2];
+      const y1 = pos[i1 * 3 + 1], z1 = pos[i1 * 3 + 2];
+      const cr = y0 * z1 - y1 * z0;
+      A2 += cr; cy += (y0 + y1) * cr; cz += (z0 + z1) * cr;
+    }
+    const capY = cy / (3 * A2);
+    const capZ = cz / (3 * A2);
+    const s = BODY_SECTIONS[ringIdx];
+    pos.push(s[0], capY, capZ);
     uv.push(0.5, 0.5);
     for (let j = 0; j < RN; j++) {
       const a = ringIdx * RN + j, b = ringIdx * RN + ((j + 1) % RN);
