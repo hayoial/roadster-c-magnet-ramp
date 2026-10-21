@@ -910,7 +910,10 @@ const BODY_SECTIONS = [
 ];
 
 // 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
-const GLASS_X0 = -0.62, GLASS_X1 = 0.78;
+// 【玻璃开口范围】座舱天幕的纵向跨度。
+// 必须覆盖整段座舱, 否则座椅只能挤在车身中间 ——
+//   x=-1.060 是前风挡根部, x=0.900 是后风挡起沿(BODY_SECTIONS 的注释就是这么标的)
+const GLASS_X0 = -0.75, GLASS_X1 = 0.95;
 
 const CAR_RING = [
   // [高度权重, 半宽系数]
@@ -998,7 +1001,7 @@ const GLASS_DROP = 0.105;
 // 车身顶盖在这个 x 附近不下沉, 形成一根横梁, 把车顶分成前后两块风挡。
 // 加上两侧的 A 柱(前风挡前沿)与 C 柱(后风挡后沿, 都是车身肩线自带),
 // 组成四支柱拱形结构 —— 这是"车身有刚性"的关键读感。
-const B_PILLAR_X = 0.10;
+const B_PILLAR_X = 0.22;
 const B_PILLAR_HW = 0.072;   // B 柱沿 x 的半宽
 
 const FENDER_BULGE = [
@@ -1502,22 +1505,23 @@ function buildCar() {
     //   分成两块会在中间 x=0.10 留缺口 —— 那正好是磁吸盘的位置,
     //   磁吸环会从缝里露出来(青色圈穿帮)。
     //   连续一块就彻底挡住底盘, 同时给四个座椅当立足面。
-    const floor = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.05, wz), darkTrim);
-    floor.position.set(0.08, floorY - 0.025, 0);
+    // 地板长度跟着玻璃开口走(-1.05 ~ 0.90), 中心 -0.075
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.05, wz), darkTrim);
+    floor.position.set(0.10, floorY - 0.025, 0);
     g.add(floor);
     // 四面舱沿矮边(只贴地 0.06, 提供一点"围起来"的读感)
-    for (const [sx, sz, w, d] of [[0, wz/2, 1.44, 0.02], [0, -wz/2, 1.44, 0.02],
-                                  [0.72, 0, 0.02, wz], [-0.64, 0, 0.02, wz]]) {
+    for (const [sx, sz, w, d] of [[0, wz/2, 1.72, 0.02], [0, -wz/2, 1.72, 0.02],
+                                  [0.86, 0, 0.02, wz], [-0.76, 0, 0.02, wz]]) {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), cabinTrim);
-      wall.position.set(0.08 + sx, floorY + depth/2, sz);
+      wall.position.set(0.10 + sx, floorY + depth/2, sz);
       g.add(wall);
     }
   }
 
   // ---- 【四个座椅】2+2 布局, 透过天幕若隐若现 ----
   for (const [sx, sz, isRear] of [
-    [-0.42,  0.235, false], [-0.42, -0.235, false],
-    [ 0.38,  0.215, true ], [ 0.38, -0.215, true ],
+    [-0.26,  0.235, false], [-0.26, -0.235, false],
+    [ 0.68,  0.215, true ], [ 0.68, -0.215, true ],
   ]) {
     g.add(buildSeat(sx, sz, isRear, { seatMat, seatBackMat, headrestMat }));
   }
