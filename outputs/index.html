@@ -219,15 +219,17 @@ const composerRT = new THREE.WebGLRenderTarget(
 const composer = new EffectComposer(renderer, composerRT);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.42, 0.98);
+window.__bloomPass__ = bloom;   // 调试钩子: 供 tests/mat-ab.mjs 调 Bloom 参数
+window.__renderer__ = renderer;  // 调试钩子: 供测试脚本重建 PMREM 环境贴图
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 // ---------- 灯光 ----------
-const hemi = new THREE.HemisphereLight(0x2b4260, 0x090c12, 0.40);
+const hemi = new THREE.HemisphereLight(0x2b4260, 0x090c12, 0.70);
 scene.add(hemi);
 
 // 主聚光灯（工业泛光）
-const key = new THREE.SpotLight(0xfff2dc, 700, 240, Math.PI / 5.0, 0.62, 1.55);
+const key = new THREE.SpotLight(0xfff2dc, 420, 240, Math.PI / 5.0, 0.62, 1.55);
 key.position.set(-26, 52, 30);
 key.target.position.set(2, 8, 5);
 key.castShadow = true;
@@ -236,17 +238,17 @@ key.shadow.camera.near = 6; key.shadow.camera.far = 160;
 key.shadow.bias = -0.0012;
 scene.add(key, key.target);
 
-const rim = new THREE.SpotLight(0x8fd4ff, 520, 210, Math.PI / 4.1, 0.66, 1.65);
+const rim = new THREE.SpotLight(0x8fd4ff, 340, 210, Math.PI / 4.1, 0.66, 1.65);
 rim.position.set(40, 38, -34);
 rim.target.position.set(0, 12, 4);
 scene.add(rim, rim.target);
 
-const fill = new THREE.DirectionalLight(0x6b8cba, 0.48);
+const fill = new THREE.DirectionalLight(0x6b8cba, 0.95);
 fill.position.set(20, 26, 40);
 scene.add(fill);
 
 // 跟车补光：保证任何姿态（正立/侧躺/倒挂）下车身都有可读细节
-const carFill = new THREE.DirectionalLight(0xbcd2e8, 0.38);
+const carFill = new THREE.DirectionalLight(0xbcd2e8, 1.05);
 scene.add(carFill);
 scene.add(carFill.target);
 
@@ -1166,7 +1168,7 @@ function buildCar() {
   // ---- 材质 ----
   const paint = new THREE.MeshPhysicalMaterial({
     color: 0xc8d2dc, roughness: 0.30, metalness: 0.08,
-    clearcoat: 0.70, clearcoatRoughness: 0.13, envMapIntensity: 0.95,
+    clearcoat: 0.70, clearcoatRoughness: 0.13, envMapIntensity: 0.72,
   });
   const glass = new THREE.MeshPhysicalMaterial({
     color: 0x0b1219, roughness: 0.10, metalness: 0.45,
