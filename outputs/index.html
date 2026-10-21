@@ -69,6 +69,37 @@
   #hint{bottom:26px;right:22px;font-size:10px;color:#4e5f74;letter-spacing:.07em;text-align:right;line-height:1.7}
   #hint kbd{background:rgba(255,255,255,.07);border:1px solid var(--line);border-radius:3px;
     padding:1px 5px;color:#9fb3c8;font-size:9.5px}
+  /* ===== DEMO 模式 UI ===== */
+  #demoBadge{position:fixed;left:50%;top:16px;transform:translate(-50%,-24px);
+    padding:5px 16px;border-radius:999px;background:rgba(255,58,110,.16);
+    border:1px solid rgba(255,58,110,.55);color:#ff8fae;
+    font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.32em;
+    text-transform:uppercase;pointer-events:none;opacity:0;transition:.45s cubic-bezier(.2,1.2,.3,1);z-index:12}
+  #demoBadge.on{opacity:1;transform:translate(-50%,0)}
+  #demoBadge::before{content:'● ';color:#ff3a6e;animation:bl 1.4s infinite}
+
+  #demoBanner{position:fixed;left:50%;bottom:76px;transform:translate(-50%,14px);
+    display:flex;align-items:baseline;gap:12px;padding:9px 20px;border-radius:8px;
+    background:rgba(6,12,20,.78);border:1px solid rgba(79,216,255,.30);
+    backdrop-filter:blur(8px);pointer-events:none;opacity:0;transition:.35s;z-index:12}
+  #demoBanner.on{opacity:1;transform:translate(-50%,0)}
+  #demoBanner.flash{animation:bflash .55s cubic-bezier(.2,1.3,.3,1)}
+  @keyframes bflash{
+    0%{transform:translate(-50%,14px) scale(.92);opacity:0;
+       box-shadow:0 0 0 rgba(79,216,255,0)}
+    45%{transform:translate(-50%,0) scale(1.03);opacity:1;
+        box-shadow:0 0 34px rgba(79,216,255,.35)}
+    100%{transform:translate(-50%,0) scale(1);opacity:1;
+          box-shadow:0 0 18px rgba(79,216,255,.12)}
+  }
+  #demoBanner b{font:700 17px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.16em;color:#4fd8ff;text-shadow:0 0 14px rgba(79,216,255,.55)}
+  #demoBanner span{font:400 11px/1 system-ui,-apple-system,sans-serif;letter-spacing:.22em;color:#8fb6cc}
+
+  /* DEMO 模式下隐藏操作提示(录屏更干净) */
+  body.demo #hint{opacity:0;transition:opacity .4s}
+  #hint{transition:opacity .4s}
+
   .vh{position:fixed;left:0;right:0;top:0;bottom:0;pointer-events:none;
     background:radial-gradient(ellipse at 50% 48%,transparent 52%,rgba(0,0,0,.55) 100%)}
 </style>
@@ -120,8 +151,12 @@
 
 <div class="panel" id="hint">
   <kbd>SPACE</kbd> 播放/暂停 &nbsp; <kbd>R</kbd> 重置<br>
-  <kbd>C</kbd> 切机位 &nbsp; <kbd>1</kbd>–<kbd>4</kbd> 视角 &nbsp; 拖动时间轴可擦洗
+  <kbd>C</kbd> 切机位 &nbsp; <kbd>1</kbd>–<kbd>4</kbd> 视角 &nbsp; 拖动时间轴可擦洗<br>
+  <kbd>D</kbd> <b style="color:#ff8fae">演示模式</b>（自动播放 + 机位自动轮切，适合录屏）
 </div>
+
+<div id="demoBadge">Demo Mode</div>
+<div id="demoBanner"><b>TRACKING</b><span>助跑</span></div>
 
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2305080c'/%3E%3Cpath d='M4 24 Q16 4 28 24' fill='none' stroke='%234fd8ff' stroke-width='3'/%3E%3C/svg%3E">
 <script type="importmap">
@@ -1394,9 +1429,107 @@ const VIEWS = [
   { name: 'TRACKING', fov: 30, off: { x: 10.0, y: 7.5, z: 5.0 }, lowY: -6.0, look: { x: 0, y: 0, z: 0 } },
   { name: 'LOW HERO', fov: 28, off: { x: -8.0, y: 6.0, z: 4.5 }, lowY: -4.8, look: { x: 0, y: 0, z: 0 } },
   { name: 'CRANE', fov: 36, off: { x: -14, y: 12, z: 19 }, lowY: -9, look: { x: 0, y: 0, z: 0 } },
-  { name: 'WIDE', fov: 44, off: { x: -24, y: 10, z: 32 }, lowY: -8, look: { x: 0, y: 0, z: 0 } },
+  { name: 'WIDE', fov: 38, off: { x: -17, y: 7.0, z: 21 }, lowY: -5.5, look: { x: 0, y: 0, z: 0 } },
 ];
 let viewIdx = 0;
+
+// ============================================================
+//  DEMO 模式 —— 录屏展示用
+//
+//  目的: 一键进入自动演示, 让机位切换能力完整呈现, 适合录屏。
+//  编排原则: 机位跟【动作阶段】对齐, 而不是机械定时 ——
+//    助跑用 TRACKING 贴地跟车, 上坡用 CRANE 看全貌,
+//    倒挂用 LOW HERO 从坡道下方仰拍(最戏剧), 空中翻转用 TRACKING 跟车,
+//    落地用 WIDE 收全景。
+// ============================================================
+const DEMO_SHOTS = [
+  // [起始时间, 结束时间, 机位索引, 说明]
+  { t0: 0.00, t1: 0.90, v: 3, name: 'WIDE',    note: '开场全景' },
+  { t0: 0.90, t1: 2.20, v: 0, name: 'TRACKING', note: '助跑' },
+  { t0: 2.20, t1: 4.20, v: 2, name: 'CRANE',    note: '爬坡升空' },
+  { t0: 4.20, t1: 6.10, v: 1, name: 'LOW HERO', note: '磁吸 · 倒挂' },
+  { t0: 6.10, t1: 8.60, v: 0, name: 'TRACKING', note: '脱轨 · 喷气' },
+  { t0: 8.60, t1: 10.10, v: 2, name: 'CRANE',    note: '空中翻正' },
+  { t0: 10.10, t1: 11.60, v: 1, name: 'LOW HERO', note: '缓降' },
+  { t0: 11.60, t1: 99.00, v: 0, name: 'TRACKING', note: '落地触地' },
+];
+
+let demoMode = false;
+let demoLoop = true;      // 播完自动重播
+let timeScale = 1;        // 播放倍速(演示用, 1 = 正常)
+let demoShotIdx = -1;
+let demoCycle = 0;
+
+function demoShotFor(time) {
+  for (let i = 0; i < DEMO_SHOTS.length; i++) {
+    const s = DEMO_SHOTS[i];
+    if (time >= s.t0 && time < s.t1) return { i, s };
+  }
+  return null;
+}
+
+function applyDemoShot(time) {
+  const hit = demoShotFor(time);
+  if (!hit) return;
+  if (hit.i !== demoShotIdx) {
+    demoShotIdx = hit.i;
+    viewIdx = hit.s.v;
+    showDemoBanner(hit.s);
+    // 横幅闪一下, 让"机位切换"这个动作本身可被看见
+    const el = document.getElementById('demoBanner');
+    if (el) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+  }
+}
+
+let demoBannerTimer = 0;
+function showDemoBanner(shot) {
+  const el = document.getElementById('demoBanner');
+  if (!el) return;
+  el.innerHTML = '<b>' + shot.name + '</b><span>' + shot.note + '</span>';
+  el.classList.add('on');
+  clearTimeout(demoBannerTimer);
+  // demo 模式下常驻(录屏时能一直读到当前机位); 退出 demo 时才移除
+  clearTimeout(demoBannerTimer);
+  if (!demoMode) {
+    demoBannerTimer = setTimeout(() => el.classList.remove('on'), 2600);
+  }
+}
+
+function enterDemo() {
+  demoMode = true;
+  demoShotIdx = -1;
+  demoCycle = 0;
+  t = 0;
+  playing = true;
+  viewIdx = 0;
+  document.body.classList.add('demo');
+  const el = document.getElementById('demoBadge');
+  if (el) el.classList.add('on');
+  applyDemoShot(t);
+}
+function exitDemo() {
+  demoMode = false;
+  document.body.classList.remove('demo');
+  const el = document.getElementById('demoBadge');
+  if (el) el.classList.remove('on');
+  const b = document.getElementById('demoBanner');
+  if (b) b.classList.remove('on');
+}
+function toggleDemo() { demoMode ? exitDemo() : enterDemo(); }
+
+// URL 参数支持:
+//   ?demo=1        开机直接进入演示模式(录屏用)
+//   ?demo=0        开机不进入
+//   ?demo=1&once=1 播完不循环, 停在结尾
+function applyUrlParams() {
+  const q = new URLSearchParams(location.search);
+  const sp = parseFloat(q.get('speed'));
+  if (Number.isFinite(sp) && sp > 0.05 && sp <= 4) timeScale = sp;
+  if (q.get('demo') === '1') {
+    demoLoop = q.get('once') !== '1';
+    enterDemo();
+  }
+}
 
 // ============================================================
 //  时间轴 & 播放控制
@@ -1411,6 +1544,14 @@ window.__RD__ = {
   get playing() { return playing; }, set playing(v) { playing = v; },
   get viewIdx() { return viewIdx; }, set viewIdx(v) { viewIdx = v; },
   setView(i) { viewIdx = i; }, seek(v) { t = v; },
+  demo: {
+    get on() { return demoMode; },
+    enter: enterDemo, exit: exitDemo, toggle: toggleDemo,
+    shots: DEMO_SHOTS,
+    get shot() { return demoShotFor(t); },
+    // 跳转到指定时刻并对齐机位(录屏时想定格某段用这个)
+    seek(v) { t = Math.max(0, Math.min(T, v)); demoShotIdx = -1; applyDemoShot(t); },
+  },
   carPos: () => ({ x: +car.position.x.toFixed(2), y: +car.position.y.toFixed(2), z: +car.position.z.toFixed(2) }),
   // 车在屏幕上的投影位置(诊断用): 判断车是否在画面内
   carScreen: () => {
@@ -1488,7 +1629,8 @@ addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.code === 'Space') { e.preventDefault(); playing = !playing; }
   else if (e.key === 'r' || e.key === 'R') { t = 0; }
-  else if (e.key === 'c' || e.key === 'C') { viewIdx = (viewIdx + 1) % VIEWS.length; }
+  else if (e.key === 'c' || e.key === 'C') { if (!demoMode) viewIdx = (viewIdx + 1) % VIEWS.length; }
+  else if (e.key === 'd' || e.key === 'D') { toggleDemo(); }
   else if (e.key >= '1' && e.key <= '4') { viewIdx = +e.key - 1; }
 });
 
@@ -1637,9 +1779,17 @@ function frame(now) {
   let dt = Math.min(0.05, nowS - last);
   last = nowS;
   if (playing && !scrubbing) {
-    t += dt;
-    if (t >= T) { t = T; playing = false; }
+    t += dt * timeScale;
+    if (t >= T) {
+      if (demoMode && demoLoop) {
+        // DEMO: 播完自动重播, 机位表从头走
+        t = 0; demoShotIdx = -1; demoCycle++;
+      } else {
+        t = T; playing = false;
+      }
+    }
   }
+  if (demoMode) applyDemoShot(t);
   window.__RD__.t = t;
 
   const s = TL.sample(t);
@@ -1851,6 +2001,8 @@ function frame(now) {
   window.__RD__.frames++;
 }
 requestAnimationFrame(frame);
+// URL 参数在首帧之外应用一次(不能在 frame() 内调用 —— 那会每帧重置 t)
+applyUrlParams();
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;

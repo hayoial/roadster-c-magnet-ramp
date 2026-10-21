@@ -18,7 +18,9 @@
     "test:visual:gallery": "node tests/gallery-shots.mjs",
     "test:visual:frames": "node tests/visual-reference.mjs",
     "test:visual:compare": "node tests/side-by-side.mjs",
-    "test:visual:nozzles": "node tests/nozzle-timeline.mjs"
+    "test:visual:nozzles": "node tests/nozzle-timeline.mjs",
+    "demo": "node tests/demo-shots.mjs",
+    "test:visual:demo": "node tests/demo-shots.mjs"
   },
   "license": "MIT",
   "private": true,
