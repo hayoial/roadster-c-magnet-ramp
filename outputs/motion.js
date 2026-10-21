@@ -39,7 +39,7 @@ export const CFG = {
   g: 9.81, drag: 0.0030,
   // ---- 磁吸捕获 ----
   magStart: 0.50,       // 捕获起点（a/π）
-  holdTime: 1.0,        // 顶部倒挂静止时长
+  holdTime: 0.32,       // 顶部倒挂保持时长 (原视频没有长静止, 吸附后很快松脱)
   // ---- 脱轨后 ----
   descentA0: 3.40,      // 反推冷气段初始净下压加速度 (m/s²)
   descentFall: 0.40,    // 速度越高推力越大 → 下压衰减比例
@@ -216,8 +216,17 @@ export function buildTimeline(cfg = CFG) {
       `残余速度 ${capEndV.toFixed(6)} m/s`);
   }
   // 顶部倒挂保持
-  for (let i = 0; i < Math.round(C.holdTime / dt); i++)
-    push({ kind: 'hang', x: 0, y: 0, z: 0, a: Math.PI, v: 0, vy: 0, roll: 0, mist: 0, jet: 0, pulse: 0, susp: 0, gLoad: 0, mag: 1, thr: 0 });
+  //   位置必须与磁吸面严格贴合(位置由渲染层按 a=PI 计算), 所以这里只改受力提示:
+  //   gLoad / mag 随时间轻微变化, 暗示"磁力正在减弱, 即将松脱", 避免画面看起来卡死。
+  {
+    const nHold = Math.round(C.holdTime / dt);
+    for (let i = 0; i < nHold; i++) {
+      const u = nHold > 1 ? i / (nHold - 1) : 1;
+      push({ kind: 'hang', x: 0, y: 0, z: 0, a: Math.PI, v: 0, vy: 0,
+             roll: 0, mist: 0, jet: 0, pulse: 0, susp: 0,
+             gLoad: -0.14 * u * u, mag: 1 - 0.22 * u * u, thr: 0 });
+    }
+  }
   const tRelease = st[st.length - 1].t + dt;
 
   // ---------- 阶段 3：脱轨自由运动 ----------

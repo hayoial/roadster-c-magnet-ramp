@@ -7,63 +7,47 @@
  * 关键帧时间戳来自原视频 (ref/REFERENCE-FRAMES.md)。
  * 诊断机位为固定侧视机位, 保证参考帧与渲染帧能对比车身轮廓与姿态。
  */
-import { chromium } from '/Users/shuai/node_modules/playwright/index.mjs';
-import { fileURLToPath } from 'node:url';
+import { loadPlaywright, launchBrowser, serveOutputs, advanceFrames, collectErrors, ROOT } from './_harness.mjs';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'ref', 'render');
 fs.mkdirSync(OUT, { recursive: true });
 
 // 关键帧: 时刻(渲染时间) + 标签 + 原视频对应时刻 + 要验证什么
+// 2026-10-21 更新: holdTime 1.0 -> 0.32, 时间轴前移
 const KEYS = [
   { t: 0.60,  label: '01-approach',   note: '助跑起始，车头朝前' },
   { t: 1.80,  label: '02-approach',   note: '助跑，侧面轮廓与比例' },
   { t: 2.60,  label: '03-climb',      note: '上坡，车身贴合坡道' },
   { t: 3.60,  label: '04-capture',    note: '磁吸捕获，接近倒挂' },
   { t: 5.20,  label: '05-hang',       note: '完全倒挂（车顶朝下）' },
-  { t: 6.60,  label: '06-hang',       note: '倒挂保持' },
-  { t: 7.30,  label: '07-release',    note: '刚脱轨，首次喷气' },
-  { t: 8.40,  label: '08-roll-mid',   note: '空中旋转中段' },
-  { t: 9.60,  label: '09-roll-near',  note: '接近正立' },
-  { t: 10.60, label: '10-cushion',    note: '缓降，向下喷气' },
-  { t: 11.70, label: '11-touchdown',  note: '触地' },
+  { t: 6.30,  label: '06-hang',       note: '倒挂保持（即将松脱）' },
+  { t: 6.70,  label: '07-release',    note: '刚脱轨，首次喷气' },
+  { t: 7.60,  label: '08-roll-mid',   note: '空中旋转中段' },
+  { t: 9.40,  label: '09-roll-near',  note: '接近正立' },
+  { t: 10.40, label: '10-cushion',    note: '缓降，向下喷气' },
+  { t: 11.00, label: '11-touchdown',  note: '触地' },
 ];
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-
-const browser = await chromium.launch({
-  headless: true, executablePath: CHROME,
-  args: ['--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
-});
+const playwright = await loadPlaywright();
+const srv = await serveOutputs();
+const browser = await launchBrowser(playwright);
 const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
-const errors = [];
-page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
-page.on('console', m => { if (m.type() === 'error') errors.push('CONSOLE: ' + m.text()); });
+const errors = collectErrors(page);
 
-const BASE = process.env.RD_BASE || 'http://localhost:8765';
-await page.goto(BASE + '/index.html', { waitUntil: 'load', timeout: 90000 });
+await page.goto(srv.base + '/index.html', { waitUntil: 'load', timeout: 90000 });
 await page.waitForFunction(() => window.__RD__ && window.__RD__.TL, { timeout: 60000 });
 
 // 预热: 先跑几帧, 避免第一张截图抓到未绘制的首帧
-await page.evaluate(() => new Promise(res => {
-  let n = 0;
-  const tick = () => { if (++n >= 10) res(); else requestAnimationFrame(tick); };
-  requestAnimationFrame(tick);
-}));
+await advanceFrames(page, 10);
 
 const manifest = [];
 for (const k of KEYS) {
   await page.evaluate((t) => { window.__RD__.seek(t); window.__RD__.playing = false; }, k.t);
   // 等若干帧让插值稳定 —— 必须等到 rAF 真的跑过,
   // 否则 seek 后立刻截图会抓到尚未绘制的首帧(表现为全白)。
-  await page.evaluate(() => new Promise(res => {
-    let n = 0;
-    const tick = () => { if (++n >= 6) res(); else requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
-  }));
+  await advanceFrames(page, 45);   // 等相机 lerp 收敛到稳态
   await page.waitForTimeout(120);
   const file = path.join(OUT, `${k.label}.png`);
   await page.screenshot({ path: file });
@@ -79,4 +63,5 @@ for (const k of KEYS) {
 fs.writeFileSync(path.join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2));
 console.log('\n错误:', errors.length ? errors.join('\n') : '(无)');
 await browser.close();
+await srv.close();
 process.exit(errors.length ? 1 : 0);

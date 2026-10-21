@@ -12,8 +12,17 @@
     "test:particles": "node tests/particles.test.mjs",
     "test:frames": "node tests/frame-check.mjs",
     "test:browser": "python3 tests/browser.test.py",
-    "test:all": "npm test && npm run test:browser"
+    "test:all": "npm test && npm run test:visual",
+    "test:nozzles": "node tests/nozzles.test.mjs",
+    "test:visual": "node tests/run-visual.mjs",
+    "test:visual:gallery": "node tests/gallery-shots.mjs",
+    "test:visual:frames": "node tests/visual-reference.mjs",
+    "test:visual:compare": "node tests/side-by-side.mjs",
+    "test:visual:nozzles": "node tests/nozzle-timeline.mjs"
   },
   "license": "MIT",
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
 }

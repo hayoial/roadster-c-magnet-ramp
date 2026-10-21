@@ -172,7 +172,16 @@ document.getElementById('stage').appendChild(renderer.domElement);
   pmrem.dispose();
 }
 
-const composer = new EffectComposer(renderer);
+// [root-cause fix] EffectComposer defaults to a HalfFloatType render target.
+// SwiftShader / 部分软件光栅化器对 HalfFloat 支持不完整, 会让 RenderPass
+// 随机不输出内容 —— 表现为"同一帧有时有画面有时全黑"。
+// 改用 UnsignedByteType: 代价是 HDR 精度下降(辉光略弱), 换来稳定输出。
+const composerRT = new THREE.WebGLRenderTarget(
+  Math.floor(innerWidth * renderer.getPixelRatio()),
+  Math.floor(innerHeight * renderer.getPixelRatio()),
+  { type: THREE.UnsignedByteType, samples: 0 }
+);
+const composer = new EffectComposer(renderer, composerRT);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.42, 0.98);
 composer.addPass(bloom);
@@ -209,6 +218,11 @@ scene.add(carFill.target);
 // 坡道磁吸区辉光
 const magGlow = new THREE.PointLight(0x4fd8ff, 0, 26, 2);
 scene.add(magGlow);
+
+// 地面反弹光: 车在 21m 高处时用不上, 落到地面附近(缓降/落地)时
+// 没有它车体会完全陷入黑暗(实测 cushion 阶段画面 mean=0.02, 车不可见)。
+const groundBounce = new THREE.PointLight(0xbdd4e8, 0, 26, 1.8);
+scene.add(groundBounce);
 
 // 车底喷口冷光：点光放远一点 + 柔和衰减，避免车身过曝
 const jetLight = new THREE.PointLight(0xcfeaff, 0, 46, 1.35);
@@ -572,9 +586,11 @@ const JET_LEN = 5.2;
 
 function makeJetStream(hex) {
   const grp = new THREE.Group();
-  const geo = new THREE.CylinderGeometry(0.028, 0.16, JET_LEN, 10, 1, true);
-  geo.translate(0, -JET_LEN / 2, 0);       // 根部对齐原点
-  geo.rotateX(Math.PI);                   // 尖端朝 -Y
+  // 根部细、远端粗的锥体, 沿 -Y 延伸且根部贴在原点(喷口位置)
+  const geo = new THREE.CylinderGeometry(0.020, 0.19, JET_LEN, 12, 6, true);
+  geo.translate(0, -JET_LEN / 2, 0);       // 细端(根部)对齐原点
+  // 不要 rotateX(PI): 几何已沿 -Y, 朝向四元数也是把 (0,-1,0) 对齐到喷口轴线。
+  // 曾经多转了 180 度 => 喷流朝 -dir => 光束贯穿车身。
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: new THREE.Color(hex) },
@@ -583,10 +599,19 @@ function makeJetStream(hex) {
     },
     vertexShader: `
       varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      uniform float uTime;
       void main(){
         vUv = uv;
+        vec3 p = position;
+        // 沿轴向的低频摆动: 射流不再是笔直的"柱子", 而会轻微扭动
+        float w = uTime * 2.2;
+        float sway = sin(uv.y * 3.4 + w) * 0.055 + sin(uv.y * 7.1 - w * 1.7) * 0.028;
+        p.x += sway * uv.y;
+        p.z += cos(uv.y * 4.1 + w * 1.3) * 0.045 * uv.y;
+        // 远端略微膨胀, 根部收紧
+        p.xz *= 1.0 + 0.22 * pow(uv.y, 1.6);
         vN = normalize(mat3(modelMatrix) * normal);
-        vec4 wp = modelMatrix * vec4(position,1.0);
+        vec4 wp = modelMatrix * vec4(p,1.0);
         vV = normalize(cameraPosition - wp.xyz);
         gl_Position = projectionMatrix * viewMatrix * wp;
       }`,
@@ -594,13 +619,40 @@ function makeJetStream(hex) {
       precision highp float;
       uniform vec3 uColor; uniform float uOpacity; uniform float uTime;
       varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+
+      // value-noise + fbm: 沿轴向滚动的湍流, 让射流边缘破碎而不是死板直筒
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+      float vnoise(vec2 p){
+        vec2 i = floor(p), f = fract(p);
+        f = f*f*(3.0-2.0*f);
+        return mix(mix(hash(i), hash(i+vec2(1,0)), f.x),
+                   mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
+      }
+      float fbm(vec2 p){
+        float v = 0.0, a = 0.5;
+        for(int i=0;i<3;i++){ v += a*vnoise(p); p *= 2.03; a *= 0.5; }
+        return v;
+      }
+
       void main(){
         float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
         float core = pow(1.0 - rim, 1.6);
-        float fall = pow(1.0 - vUv.y, 2.2);
-        float flick = 0.82 + 0.18 * sin(vUv.y * 26.0 - uTime * 22.0);
-        float a = uOpacity * fall * (0.22 + core * 0.95) * flick;
-        vec3 col = mix(uColor, vec3(1.0), core * 0.55);
+
+        // 沿射流轴向滚动的湍流: 越远越碎
+        float t = uTime * 3.4;
+        float turb  = fbm(vec2(vUv.x * 7.0,  vUv.y * 5.0 - t)) - 0.5;
+        float turb2 = fbm(vec2(vUv.x * 15.0 + 3.0, vUv.y * 9.0 - t * 1.6)) - 0.5;
+
+        // 轴向衰减: 根部亮而实, 远端淡而散
+        float fall = pow(1.0 - vUv.y, 1.9);
+        // 湍流把边缘撕碎(远端更明显)
+        float shred = fall * (0.62 + 0.95 * turb + 0.55 * turb2);
+        // 沿轴向的流动条纹
+        float flick = 0.78 + 0.22 * sin(vUv.y * 30.0 - uTime * 26.0 + turb * 6.0);
+
+        float a = uOpacity * clamp(shred, 0.0, 1.0) * (0.20 + core * 0.95) * flick;
+        // 远端偏白(冷凝雾化), 根部保留青蓝
+        vec3 col = mix(uColor, vec3(0.90, 0.98, 1.0), core * 0.25 + vUv.y * 0.35);
         gl_FragColor = vec4(col, a);
       }`,
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
@@ -636,40 +688,49 @@ function makeJetStream(hex) {
 
 const NOZZLE_DEFS = [
   // ============================================================
-  // 【证据分级】
-  // 视频可见事实 (ref/REFERENCE-FRAMES.md):
-  //   19.6-20.0s  倒挂时 车尾朝向镜头, 底部 2 条蓝色光束斜下外张
-  //   20.4-21.2s  光束增至 3-4 条, 仍指向下方
-  //   21.4-22.0s  4 条平行蓝色光束, 朝下
-  //   22.5-23.3s  车翻正过程中底部涌出大量白色蒸汽, 落地成云
-  //   29.0-29.8s  左右两侧对称的成对白色羽流 (注: 属第二段踢翻, 仅作形态参考)
+  // 【证据分级】详见 ref/NOZZLE-SPEC.md
   //
-  // 姿态推导: 倒挂时车停在坡道悬臂【下方】, 车顶朝下、车底朝上贴住悬臂。
-  //   => 车顶侧法向 = 局部 +Y = 世界【向下】(与画面光束朝下吻合)
-  //   => 车底侧法向 = 局部 -Y = 世界【向上】
-  // 结论: 可见的向下光束来自【车顶/上部】推进器, 这也符合 SpaceX
-  //       在演示中用车上部冷气推进器把自己推离坡道的做法。
+  // 视频可见事实 (原视频 Run one, C 形坡道段 0-23.5s):
+  //   20.4s  倒挂, 车尾朝镜头, 1 条蓝青光束自车身下部斜向左下
+  //   20.8s  2 条      21.2s 2 条
+  //   21.6s  3 条      22.0s 3 条
+  //   22.4s  3-4 条, 底部开始涌白雾
+  //   22.8s  翻正中, 白雾显著增多
+  //   23.2s  基本正立(车头朝下), 底部大团白色蒸汽云
+  //   量化: 光束质心恒在尾灯亮芯【下方】(dy>0); 白雾像素
+  //        2054(20.4s) -> 18957(22.4s) -> 30524(23.2s)
   //
-  // 合理近似 (视频不可见的部分, 明确标注):
-  //   - 光束具体 3D 坐标与锥角: 视频只能看出"从上部/尾部、4 条、平行朝下"
-  //   - 内部推进器结构: 视频不可见, 不作任何断言
+  // 姿态事实:
+  //   12.0s 车头朝左(略俯) -> 20.4s 车头朝左下 -> 23.2s 车头朝下
+  //   尾部扰流板(白色板状件)在画面右上角位置基本不变
+  //   => 翻转是【俯仰 nose-down】, 不是绕纵轴的横滚
+  //   => 倒挂时车【顶/甲板】朝向画面下方
+  //
+  // 光束方向推导:
+  //   倒挂时 局部 +Y(车顶/甲板法向) = 世界【向下】。
+  //   视频光束正朝下 => 喷口必须装在【车顶/甲板】侧, 沿局部 +Y 喷射。
+  //   车尾下缘的车尾推进器额外带一个 +X(车尾) 分量, 使光束在倒挂初期
+  //   呈斜向后下(视频 20.4s 实测灯->束角 177.9°, 接近水平向后)。
+  //
+  // 合理近似 (视频不可见): 喷口精确 3D 坐标、锥角、内部结构均不作断言。
   // ============================================================
 
-  // ---- 车顶/尾部 4 束主喷流 (视频可见: 倒挂时向下, 4 条平行) ----
-  // 19.6s 帧: 光束自车尾/顶盖一侧射出, 指向画面左下方 (车尾朝向镜头时 = 后下方)
-  // => 局部方向 = 后向(+X 车尾) + 向下(+Y 顶盖侧) + 外扩(±Z)
-  { id: 'top-rear-l',  pos: [ 1.62, 0.930,  0.40], dir: [ 0.42,  1,  0.16], type: 'main',     stage: ['hang', 'descent', 'roll'], gain: 1.00 },
-  { id: 'top-rear-r',  pos: [ 1.62, 0.930, -0.40], dir: [ 0.42,  1, -0.16], type: 'main',     stage: ['hang', 'descent', 'roll'], gain: 1.00 },
-  { id: 'top-mid-l',   pos: [ 0.90, 1.075,  0.44], dir: [ 0.30,  1,  0.16], type: 'main',     stage: ['descent', 'roll'], gain: 0.92 },
-  { id: 'top-mid-r',   pos: [ 0.90, 1.075, -0.44], dir: [ 0.30,  1, -0.16], type: 'main',     stage: ['descent', 'roll'], gain: 0.92 },
+  // ---- 甲板/尾部 4 束主喷流 (视频可见: 1->2->3->4 条, 倒挂时朝下) ----
+  { id: 'deck-rear-l', pos: [ 1.72, 0.930,  0.40], dir: [ 0.34,  1,  0.16], type: 'main', stage: ['hang','descent','roll'], gain: 1.00 },
+  { id: 'deck-rear-r', pos: [ 1.72, 0.930, -0.40], dir: [ 0.34,  1, -0.16], type: 'main', stage: ['hang','descent','roll'], gain: 1.00 },
+  { id: 'deck-mid-l',  pos: [ 0.72, 1.080,  0.44], dir: [ 0.22,  1,  0.16], type: 'main', stage: ['descent','roll'], gain: 0.92 },
+  { id: 'deck-mid-r',  pos: [ 0.72, 1.080, -0.44], dir: [ 0.22,  1, -0.16], type: 'main', stage: ['descent','roll'], gain: 0.92 },
 
-  // ---- 车底 1 束: 翻正后的【向下缓降】推力 (正立时朝下) ----
-  { id: 'under-core',  pos: [ 0.10, 0.365,  0.00], dir: [ 0, -1,  0], type: 'descent', stage: ['descent', 'cushion'], gain: 1.15 },
+  // ---- 翻正后的向下缓降喷口 (车底中央) ----
+  //      【阶段语义】只在【车已翻正】的 cushion 阶段激活。
+  //      局部 -Y = 车底 => 车翻正后恰为世界下方 => 语义与方向一致。
+  //      绝不能在车辆仍倒挂(descent/roll)时当作"向下缓降推力"使用 ——
+  //      倒挂时局部 -Y 指向世界上方, 会变成朝上的错误推力。
+  { id: 'under-core', pos: [ 0.10, 0.365, 0 ], dir: [ 0, -1, 0 ], type: 'descent', stage: ['cushion'], gain: 1.15 },
 
-  // ---- 姿态控制: 左右侧向成对喷口 ----
-  // 视频中"左右对称的成对白羽流"是姿态控制喷气, 形态与向下缓降不同。
-  { id: 'attitude-l',  pos: [ 0.24, 0.560,  0.95], dir: [ 0, -0.42,  1], type: 'attitude', stage: ['roll'], gain: 0.90 },
-  { id: 'attitude-r',  pos: [ 0.24, 0.560, -0.95], dir: [ 0, -0.42, -1], type: 'attitude', stage: ['roll'], gain: 0.90 },
+  // ---- 姿态控制: 左右侧向成对喷口 (空中翻正时修正横滚) ----
+  { id: 'attitude-l', pos: [ 0.24, 0.560,  0.95], dir: [ 0, -0.42,  1 ], type: 'attitude', stage: ['roll'], gain: 0.90 },
+  { id: 'attitude-r', pos: [ 0.24, 0.560, -0.95], dir: [ 0, -0.42, -1 ], type: 'attitude', stage: ['roll'], gain: 0.90 },
 ];
 
 /** 运行时喷口实例：持有局部常量 + 世界坐标缓存 */
@@ -697,18 +758,32 @@ class Nozzle {
 const nozzles = NOZZLE_DEFS.map(d => new Nozzle(d));
 const nozzlesById = Object.fromEntries(nozzles.map(n => [n.id, n]));
 
-/** 按阶段与类型设置每个喷口的强度 */
-function updateNozzles(phase, phaseIntensity) {
+/**
+ * 按阶段与类型设置每个喷口的强度。
+ *
+ * carUp: 车辆当前【车顶】世界方向(单位向量)。用于保证"主喷流朝下"的物理语义:
+ *   甲板喷口沿局部 +Y 喷射, 只有当车顶朝向世界下方(up.y < 0)时它才是
+ *   【向下推力】。车翻正后(up.y > 0)它会变成朝上的推力 —— 此时必须停用,
+ *   把向下的缓降任务交给车底的 under-core 喷口。
+ */
+function updateNozzles(phase, phaseIntensity, carUp) {
+  const upY = carUp ? carUp.y : 0;
   for (const n of nozzles) {
     let want = 0;
     if (n.stages.has(phase)) {
-      if (n.type === 'attitude') {
-        // 姿态喷气: 在 roll 阶段最活跃, 接近正立时减弱
-        want = phaseIntensity * n.gain;
-      } else if (n.type === 'descent') {
-        want = phaseIntensity * n.gain;
+      if (n.type === 'main') {
+        // 主喷流(甲板侧): 仅在车顶朝下(倒挂)时有效 —— 此时它才是向下推力。
+        // 翻正过程(up.y 由负转正)自然衰减, 避免出现朝上的错误推力。
+        const downFactor = upY < 0 ? Math.min(1, -upY * 1.6) : 0;
+        want = phaseIntensity * n.gain * downFactor;
       } else {
-        want = phaseIntensity * n.gain;
+        // descent 喷口(车底): 仅在车已翻正(up.y > 0)时才是向下缓降推力
+        if (n.type === 'descent') {
+          const upFactor = upY > 0 ? Math.min(1, upY * 1.6) : 0;
+          want = phaseIntensity * n.gain * upFactor;
+        } else {
+          want = phaseIntensity * n.gain;
+        }
       }
     }
     // 平滑过渡，避免喷口开合是硬切。
@@ -728,7 +803,7 @@ function updateNozzles(phase, phaseIntensity) {
 function buildJetStreams(carGroup) {
   for (const n of nozzles) {
     const isAtt = n.type === 'attitude';
-    const g = makeJetStream(isAtt ? 0xbfe4ff : 0x7fd4f5);
+    const g = makeJetStream(isAtt ? 0xa8d8f0 : 0x4aa8d8);
     // 姿态喷气锥体更短更粗, 主喷流更长更窄
     g.scale.set(isAtt ? 1.9 : 1, isAtt ? 0.30 : 1, isAtt ? 1.9 : 1);
     g.position.copy(n.localPos);
@@ -780,6 +855,18 @@ const BODY_SECTIONS = [
 // 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
 const GLASS_X0 = -0.62, GLASS_X1 = 0.78;
 
+const CAR_RING = [
+  [0.00, 0.40],   // 底板中心
+  [0.07, 0.78],   // 底板边缘
+  [0.18, 0.94],   // 下腰
+  [0.34, 1.00],   // 侧腰最宽
+  [0.52, 0.995],  // 上腰线
+  [0.70, 0.94],   // 车顶侧缘
+  [0.86, 0.78],   // 顶盖收窄
+  [0.95, 0.48],   // 顶盖肩
+  [1.00, 0.10],   // 顶盖中心
+];
+
 /**
  * 车身主体：沿 X 轴放样 BODY_SECTIONS，生成带倒角腰线的封闭壳体。
  * 截面在每个 x 处构造为一个 8 点的闭合多边形（顶盖窄、腰部宽、底板平），
@@ -801,10 +888,7 @@ function bodySurfaceZ(x, y) {
   const hw   = a[3] + (b[3] - a[3]) * t;
   // 2) 把 y 换算成截面高度权重, 再在 RING 上插值出半宽系数
   const tw = Math.max(0, Math.min(1, (y - yBot) / (yTop - yBot || 1)));
-  const R = [
-    [0.00, 0.50], [0.09, 0.90], [0.26, 0.995], [0.50, 1.00],
-    [0.72, 0.93], [0.88, 0.72], [1.00, 0.10],
-  ];
+  const R = CAR_RING;   // 与 buildBodyShell 共用同一份轮廓
   let wf = R[0][1];
   for (let k = 0; k < R.length - 1; k++) {
     if (tw >= R[k][0] && tw <= R[k + 1][0]) {
@@ -817,21 +901,16 @@ function bodySurfaceZ(x, y) {
   return hw * wf;
 }
 
+// 车身横截面轮廓 (高度权重, 半宽系数) —— 唯一真源。
+// buildBodyShell() 与 bodySurfaceZ() 必须共用, 否则附件会贴到错误的位置。
+
 function buildBodyShell() {
   // 每个 X 截面是一个闭合多边形: 底板 -> 侧腰 -> 顶盖, 左右对称。
   // 用 (dy, dzFactor) 定义 8 个轮廓点, dzFactor 是该处半宽的比例。
   // [高度权重, 半宽系数] —— 只描述【右半边】, 左半边由镜像生成。
   // 索引 0 = 底板中心, 索引 6 = 顶盖中心。
-  const RING = [
-    [0.00, 0.50],   // 底板中心
-    [0.09, 0.90],   // 底板边缘
-    [0.26, 0.995],  // 侧腰最宽
-    [0.50, 1.00],   // 上腰线
-    [0.72, 0.93],   // 车顶侧缘
-    [0.88, 0.72],   // 顶盖收窄
-    [1.00, 0.10],   // 顶盖中心
-  ];
-  const HALF = RING.length;                 // 7
+  const RING = CAR_RING;
+  const HALF = RING.length;                 // 9
   // 完整环: 右半边(0..HALF-1) + 左半边镜像(不含两端中心点)
   const RING_FULL = [];
   for (let j = 0; j < HALF; j++) RING_FULL.push([RING[j][0],  RING[j][1],  1]);
@@ -842,7 +921,8 @@ function buildBodyShell() {
   for (let i = 0; i < BODY_SECTIONS.length; i++) {
     const [px, yTop, yBot, hw] = BODY_SECTIONS[i];
     // 顶盖在座舱区更拱: 用拱高系数
-    const arch = 0.055 * Math.sin(Math.PI * Math.max(0, Math.min(1, (px + 1.1) / 2.6)));
+    // 顶盖拱高加大 -> 座舱有鼓起的体积感, 消除扁平感
+    const arch = 0.105 * Math.sin(Math.PI * Math.max(0, Math.min(1, (px + 1.1) / 2.6)));
     for (let j = 0; j < RN; j++) {
       const [tw, wf, sign] = RING_FULL[j];
       const y = yBot + (yTop - yBot) * tw;
@@ -890,15 +970,17 @@ function buildGlassCanopy() {
   for (const s of BODY_SECTIONS) {
     if (s[0] >= GLASS_X0 && s[0] <= GLASS_X1) segs.push(s);
   }
-  const N = 9;
+  // 环绕采样: a 从 -PI/2 走到 +PI/2, z = -sin(a) 覆盖 [-hw, +hw] 全宽。
+  // 【根因修复】旧版用 -cos(a) 而 a∈[-PI/2,PI/2] => cos 恒正 => 只生成 -Z 半边,
+  // 表现为车顶一块单侧黑色矩形, 运动中随视角忽隐忽现。
+  const N = 15;
   for (let i = 0; i < segs.length; i++) {
     const [px, yTop, yBot, hw] = segs[i];
     for (let j = 0; j < N; j++) {
       const u = j / (N - 1);
-      // 半椭圆拱形：-1..1
-      const a = (u - 0.5) * Math.PI;
-      const z = -Math.cos(a) * hw * 0.46;
-      const y = yTop + Math.sin(a) * 0.018;
+      const a = -Math.PI / 2 + u * Math.PI;      // -PI/2 .. +PI/2
+      const z = -Math.sin(a) * hw * 0.50;        // -hw/2 .. +hw/2 (全宽)
+      const y = yTop + Math.cos(a) * 0.038;      // 拱形: 中间高, 两侧落到 yTop
       pos.push(px, y, z);
       uv.push(u, i / (segs.length - 1));
     }
@@ -1106,6 +1188,11 @@ buildJetStreams(car);
 scene.add(car);
 window.__scene__ = scene;
 window.__car__ = car;
+window.__camObj__ = camera;
+window.__rendererInfo__ = () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, frame: renderer.info.render.frame });
+window.__contextLost__ = () => renderer.getContext().isContextLost();
+// 原始喷口配置(供 tests/nozzles.test.mjs 读取阶段与局部轴线)
+window.__nozzlesRaw__ = () => nozzles;
 window.__nozzles__ = () => nozzles.map(n => ({
   id: n.id, type: n.type,
   localPos: [+n.localPos.x.toFixed(3), +n.localPos.y.toFixed(3), +n.localPos.z.toFixed(3)],
@@ -1281,7 +1368,7 @@ const jetPuffs = new PuffPool(420, jetTex, 0x86d8f5, 1.0, { gravity: 0.0, drag: 
 // 姿态喷气: 白蓝色羽流 (原视频 29.0-29.8s 左右对称的成对白羽流)
 const pulsePuffs = new PuffPool(300, softTex, 0xcfe8ff, 1.0, { gravity: 0.6, drag: 0.9, slowdown: 0.0 });
 // 贴地白雾: 落地/近地时的大团蒸汽云
-const mistPuffs = new PuffPool(320, mistTex, 0xffffff, 1.0, { gravity: 0.35, drag: 1.9, slowdown: 0.6 });
+const mistPuffs = new PuffPool(320, mistTex, 0x9fb4c8, 1.0, { gravity: 0.35, drag: 1.9, slowdown: 0.6 });
 
 // ============================================================
 //  相机机位
@@ -1325,6 +1412,13 @@ window.__RD__ = {
   get viewIdx() { return viewIdx; }, set viewIdx(v) { viewIdx = v; },
   setView(i) { viewIdx = i; }, seek(v) { t = v; },
   carPos: () => ({ x: +car.position.x.toFixed(2), y: +car.position.y.toFixed(2), z: +car.position.z.toFixed(2) }),
+  // 车在屏幕上的投影位置(诊断用): 判断车是否在画面内
+  carScreen: () => {
+    const v = new THREE.Vector3(car.position.x, car.position.y, car.position.z).project(camera);
+    return { x: Math.round((v.x * 0.5 + 0.5) * innerWidth),
+             y: Math.round((-v.y * 0.5 + 0.5) * innerHeight),
+             inView: v.z < 1 && Math.abs(v.x) < 1 && Math.abs(v.y) < 1 };
+  },
   camPos: () => ({ x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2) }),
   quat: () => ({ x: +car.quaternion.x.toFixed(6), y: +car.quaternion.y.toFixed(6), z: +car.quaternion.z.toFixed(6), w: +car.quaternion.w.toFixed(6) }),
   carBasis: () => ({
@@ -1489,7 +1583,7 @@ function emitJet(dt, intensity) { /* 由 emitFromNozzles 取代 */ }
 function emitPulse(dt, intensity) { /* 由 emitFromNozzles 取代 */ }
 function emitMist(dt, intensity) {
   if (intensity <= 0.01) return;
-  const n = Math.min(11, Math.floor(intensity * 68 * dt + Math.random()));
+  const n = Math.min(8, Math.floor(intensity * 42 * dt + Math.random()));
   for (let i = 0; i < n; i++) {
     car.updateMatrixWorld();
     const p = new THREE.Vector3((Math.random() - .5) * 2.6, 0.34, (Math.random() - .5) * 1.1);
@@ -1498,7 +1592,7 @@ function emitMist(dt, intensity) {
     const sp = 3.4 + Math.random() * 4.2;
     mistPuffs.spawn(p.x, p.y, p.z,
       (Math.random() - .5) * sp, 0.4 + Math.random() * 1.4, (Math.random() - .5) * sp,
-      1.6 + Math.random() * 1.4, 0.55 + Math.random() * 0.45, 3.4 + Math.random() * 2.2);
+      1.6 + Math.random() * 1.4, 0.40 + Math.random() * 0.32, 2.4 + Math.random() * 1.6);
   }
 }
 
@@ -1584,23 +1678,21 @@ function frame(now) {
     : ph === 'cushion'                  ? 1.00
     : ph === 'hang'                     ? 0.60
     : 0;
-  updateNozzles(ph, ph === 'roll' ? Math.max(phaseIntensity, pulseI) : phaseIntensity);
+  updateNozzles(ph, ph === 'roll' ? Math.max(phaseIntensity, pulseI) : phaseIntensity, s.up);
   for (const n of nozzles) {
     n.update(car.matrixWorld, car.quaternion);
     if (n.stream) {
       n.stream.userData.mat.uniforms.uTime.value = nowS;
       // 锥体在车体局部, 方向由 localDir 固定; 长度随强度轻微伸缩
       const k = 0.55 + n.intensity * 0.55;
-      n.stream.scale.set(
-        (n.type === 'attitude' ? 1.9 : 1) * k,
-        (n.type === 'attitude' ? 0.30 : 1) * k,
-        (n.type === 'attitude' ? 1.9 : 1) * k
-      );
+      // 只沿轴向伸缩, 根部始终贴在喷口(整体缩放会让射流根部脱离喷口)
+      const g = n.type === 'attitude' ? 1.9 : 1.0;
+      n.stream.scale.set(g, (n.type === 'attitude' ? 0.30 : 1.0) * k, g);
     }
   }
   emitFromNozzles(dt, car, jetPuffs, pulsePuffs);
   const mistI = s.mist;
-  emitMist(dt, mistI * 0.9 + (ph === 'landed' ? Math.max(0, s.mist) * 0.5 : 0));
+  emitMist(dt, mistI * 0.75 + (ph === 'landed' ? Math.max(0, s.mist) * 0.35 : 0));
 
   // 喷口辉光: 取所有激活喷口的世界位置做加权平均
   let nAcc = 0, nX = 0, nY = 0, nZ = 0, nMax = 0;
@@ -1620,6 +1712,12 @@ function frame(now) {
   // 喷口方向的柔和补光：照亮车底而非整个车身
   jetFill.position.set(car.position.x, car.position.y - 6, car.position.z + 3);
   jetFill.intensity = phaseIntensity * 0.28;
+
+  // 地面反弹光: 车越接近地面越亮(模拟地面把车照起来)
+  const alt = Math.max(0, car.position.y);
+  const bounceK = 1 - Math.min(1, alt / 6);
+  groundBounce.position.set(car.position.x, 0.6, car.position.z);
+  groundBounce.intensity = bounceK * bounceK * 26;
   jetFill.target.position.copy(car.position);
 
   // 跟车补光：从【相机侧】打过来，保证任何姿态下车身都有可读细节。

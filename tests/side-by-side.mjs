@@ -5,12 +5,10 @@
  * 上排: 原视频 (ref/video-frames/)
  * 下排: 本项目渲染 (ref/render/)
  */
-import { chromium } from '/Users/shuai/node_modules/playwright/index.mjs';
-import path from 'node:path'; import fs from 'node:fs'; import { fileURLToPath } from 'node:url';
+import { loadPlaywright, launchBrowser, serveOutputs, advanceFrames, collectErrors, ROOT } from './_harness.mjs';
+import path from 'node:path'; import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'ref', 'compare');
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -43,30 +41,35 @@ for (const p of PAIRS) {
 }
 
 // 渲染帧
-const browser = await chromium.launch({ headless: true,
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  args: ['--enable-unsafe-swiftshader'] });
+const playwright = await loadPlaywright();
+const srv = await serveOutputs();
+const browser = await launchBrowser(playwright);
 const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
-const errors = [];
-page.on('pageerror', e => errors.push(e.message));
-await page.goto((process.env.RD_BASE || 'http://localhost:8765') + '/index.html', { waitUntil: 'load', timeout: 90000 });
+const errors = collectErrors(page);
+await page.goto(srv.base + '/index.html', { waitUntil: 'load', timeout: 90000 });
 await page.waitForFunction(() => window.__RD__ && window.__RD__.TL, { timeout: 60000 });
-await page.evaluate(() => new Promise(r => { let n = 0; const t = () => { if (++n >= 12) r(); else requestAnimationFrame(t); }; requestAnimationFrame(t); }));
+await advanceFrames(page, 12);
 
 // 渲染帧时间戳 (与 index.html 的 TL 阶段对应)
 // 渲染时间轴 (index.html TL): 0-2.25 approach / 2.25-3.25 climb / 3.25-6.1 capture
 // / 6.1-7.15 hang / 7.15-7.65 descent / 7.65-10.8 roll / 10.8-11.45 cushion / 11.45+ landed
-const RT = { '01-approach': 1.2, '02-climb': 3.4, '03-hang': 6.6, '04-release': 7.3,
-             '05-firstjet': 7.8, '06-roll-mid': 8.6, '07-roll-near': 10.2, '08-cushion': 10.9, '09-touchdown': 11.6 };
+// 渲染时间轴 (2026-10-21 更新, holdTime 1.0 -> 0.32 后时间轴前移):
+//   approach 0-2.21 / climb 2.21-3.24 / capture 3.24-6.07 / hang 6.07-6.46
+//   descent 6.46-6.96 / roll 6.96-10.09 / cushion 10.09-10.75 / landed 10.75+
+const RT = { '01-approach': 1.2, '02-climb': 3.4, '03-hang': 6.3, '04-release': 6.6,
+             '05-firstjet': 7.2, '06-roll-mid': 8.2, '07-roll-near': 9.6, '08-cushion': 10.3, '09-touchdown': 10.9 };
 
 for (const p of PAIRS) {
   await page.evaluate(t => { window.__RD__.seek(t); window.__RD__.playing = false; }, RT[p.key]);
-  await page.evaluate(() => new Promise(r => { let n = 0; const t = () => { if (++n >= 6) r(); else requestAnimationFrame(t); }; requestAnimationFrame(t); }));
+  // 相机有 lerp 平滑, seek 跳变后需要额外帧让机位收敛到稳态,
+  // 否则截到的是相机还在追的过渡画面(车可能不在画面内)。
+  await advanceFrames(page, 45);
   await page.waitForTimeout(150);
   await page.screenshot({ path: path.join(RF, `${p.key}.png`) });
   console.log('✓', p.key);
 }
 await browser.close();
+await srv.close();
 
 // 生成左右并排
 for (const p of PAIRS) {
