@@ -225,11 +225,14 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 // ---------- 灯光 ----------
-const hemi = new THREE.HemisphereLight(0x2b4260, 0x090c12, 0.70);
+// 半球光: skyColor 给上半部, groundColor 给【下半部】——
+// 车身下半部(侧壁)朝下, 只吃 groundColor。
+// groundColor 太暗 => 侧壁全黑 => 车身看着"上亮下黑"的薄片。
+const hemi = new THREE.HemisphereLight(0x3c587e, 0x4a5f78, 1.35);
 scene.add(hemi);
 
 // 主聚光灯（工业泛光）
-const key = new THREE.SpotLight(0xfff2dc, 420, 240, Math.PI / 5.0, 0.62, 1.55);
+const key = new THREE.SpotLight(0xfff2dc, 180, 240, Math.PI / 5.0, 0.62, 1.55);
 key.position.set(-26, 52, 30);
 key.target.position.set(2, 8, 5);
 key.castShadow = true;
@@ -238,17 +241,25 @@ key.shadow.camera.near = 6; key.shadow.camera.far = 160;
 key.shadow.bias = -0.0012;
 scene.add(key, key.target);
 
-const rim = new THREE.SpotLight(0x8fd4ff, 340, 210, Math.PI / 4.1, 0.66, 1.65);
+const rim = new THREE.SpotLight(0x8fd4ff, 200, 210, Math.PI / 4.1, 0.66, 1.65);
 rim.position.set(40, 38, -34);
 rim.target.position.set(0, 12, 4);
 scene.add(rim, rim.target);
 
-const fill = new THREE.DirectionalLight(0x6b8cba, 0.95);
+const fill = new THREE.DirectionalLight(0x6b8cba, 1.25);
 fill.position.set(20, 26, 40);
 scene.add(fill);
 
+// 【侧向塑形光】车身侧壁的法线朝【水平方向】，上方的 key/rim/hemi 都照不到它，
+// 结果就是侧壁全黑、上半部死白 —— 车身看起来像一张没有厚度的膜。
+// 这盏灯放在车身局部 +Z（相机同侧）、略高于腰线，在车侧压出一条
+// 上亮下暗的渐变带，侧壁的体积感就出来了。
+const sideShape = new THREE.DirectionalLight(0xdce8f6, 4.0);
+scene.add(sideShape);
+scene.add(sideShape.target);
+
 // 跟车补光：保证任何姿态（正立/侧躺/倒挂）下车身都有可读细节
-const carFill = new THREE.DirectionalLight(0xbcd2e8, 1.05);
+const carFill = new THREE.DirectionalLight(0xbcd2e8, 1.60);
 scene.add(carFill);
 scene.add(carFill.target);
 
@@ -876,22 +887,26 @@ const BODY_SECTIONS = [
   // 侧视看像鼠标的前尖; 尾部也只剩 0.28m 厚。
   // 现在首尾都给出真实厚度, 且车头 hw 增长放缓(不再尖长)——
   // 车顶高度 yTop 一律不动, 低趴跑车比例保留。
-  [-2.210,  0.645,  0.500,  0.700],  // 车鼻前缘 (有厚度的圆头, 不再是纸片尖)
-  [-2.140,  0.690,  0.470,  0.820],
-  [-2.000,  0.765,  0.430,  0.895],  // 前保险杠
-  [-1.760,  0.880,  0.400,  0.955],  // 前翼子板
-  [-1.430,  0.965,  0.385,  0.985],  // 前翼子板隆起 (轮拱顶, 明显拱起)
-  [-1.060,  0.995,  0.390,  0.992],
-  [-0.700,  1.045,  0.400,  0.994],  // 风挡根部
-  [-0.280,  1.095,  0.410,  0.995],  // 座舱前
-  [ 0.180,  1.110,  0.412,  0.995],  // 座舱中 (车顶最高 = 1.11m)
-  [ 0.560,  1.092,  0.410,  0.992],
-  [ 0.900,  1.040,  0.408,  0.975],  // 车尾玻璃起
-  [ 1.260,  1.000,  0.400,  0.960],  // 后轮拱顶 (后肩: 比座舱只低 0.11m)
-  [ 1.620,  0.955,  0.405,  0.930],  // 后肩延续
-  [ 1.930,  0.910,  0.430,  0.865],  // 尾部收
-  [ 2.130,  0.868,  0.480,  0.760],  // 尾端
-  [ 2.210,  0.830,  0.545,  0.660],  // 尾端面 (有厚度)
+  // 【本轮】底板整体下探 0.385 -> 0.215~0.300
+  //   侧壁高度 = 1.110 - 0.215 ≈ 0.895m (原来 0.725m, +23%)
+  //   => 车身下半部成为实心侧壁, 车轮只露下 1/3, 侧视不再是"薄壳贴大轮子"
+  //   磁吸盘(magPad 0.395)是【车底外挂件】, 露在车壳下方是正常的, 不受影响
+  [-2.210,  0.645,  0.340,  0.700],  // 车鼻前缘 (有厚度的圆头, 不再是纸片尖)
+  [-2.140,  0.690,  0.300,  0.820],
+  [-2.000,  0.765,  0.262,  0.895],  // 前保险杠
+  [-1.760,  0.880,  0.232,  0.955],  // 前翼子板
+  [-1.430,  0.965,  0.218,  0.985],  // 前翼子板隆起 (轮拱顶, 明显拱起)
+  [-1.060,  0.995,  0.222,  0.992],
+  [-0.700,  1.045,  0.226,  0.994],  // 风挡根部
+  [-0.280,  1.095,  0.230,  0.995],  // 座舱前
+  [ 0.180,  1.110,  0.232,  0.995],  // 座舱中 (车顶最高 = 1.11m)
+  [ 0.560,  1.092,  0.230,  0.992],
+  [ 0.900,  1.040,  0.228,  0.975],  // 车尾玻璃起
+  [ 1.260,  1.000,  0.222,  0.960],  // 后轮拱顶 (后肩: 比座舱只低 0.11m)
+  [ 1.620,  0.955,  0.226,  0.930],  // 后肩延续
+  [ 1.930,  0.910,  0.248,  0.865],  // 尾部收
+  [ 2.130,  0.868,  0.290,  0.760],  // 尾端
+  [ 2.210,  0.830,  0.345,  0.660],  // 尾端面 (有厚度)
 ];
 
 // 车顶玻璃覆盖区 (x 起, x 止) — 全景天幕
@@ -1158,7 +1173,7 @@ function buildWheelArch(cx, cz, r, width, color) {
   const m = new THREE.Mesh(g, color);
   m.rotation.y = Math.PI / 2;
   m.rotation.z = Math.PI * 0.19;   // 上半圈朝 +Y
-  m.position.set(cx, 0.282, cz);
+  m.position.set(cx, 0.230, cz);
   return m;
 }
 
@@ -1167,8 +1182,10 @@ function buildCar() {
 
   // ---- 材质 ----
   const paint = new THREE.MeshPhysicalMaterial({
-    color: 0xc8d2dc, roughness: 0.30, metalness: 0.08,
-    clearcoat: 0.70, clearcoatRoughness: 0.13, envMapIntensity: 0.72,
+    // 白色车漆, 但基色压到 0xbcc6d2: 太亮(0xc8d2dc)时顶盖高光会溢出成死白,
+    // 曲面细节全丢; 现在有侧向塑形光兜底, 可以把车漆调回接近白。
+    color: 0xbcc6d2, roughness: 0.40, metalness: 0.06,
+    clearcoat: 0.45, clearcoatRoughness: 0.16, envMapIntensity: 0.85,
   });
   const glass = new THREE.MeshPhysicalMaterial({
     color: 0x0b1219, roughness: 0.10, metalness: 0.45,
@@ -1210,31 +1227,31 @@ function buildCar() {
   {
     // 贯穿前灯带（贴在前鼻）
     const bar = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 0.92), lens);
-    bar.position.set(-2.175, 0.520, 0);
+    bar.position.set(-2.175, 0.470, 0);
     g.add(bar);
     // 下部进气口
     const grille = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.11, 1.02), darkTrim);
-    grille.position.set(-2.02, 0.448, 0);
+    grille.position.set(-2.02, 0.380, 0);
     g.add(grille);
     // 前唇
     const lip = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.05, 1.28), darkTrim);
-    lip.position.set(-2.03, 0.424, 0);
+    lip.position.set(-2.03, 0.352, 0);
     g.add(lip);
   }
 
   // ---- 车尾：贯穿尾灯 + 扩散器 ----
   {
     const tl = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 0.78), lensRed);
-    tl.position.set(2.175, 0.545, 0);
+    tl.position.set(2.175, 0.520, 0);
     g.add(tl);
     // 尾部下沿黑色饰板
     const valance = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.14, 1.28), darkTrim);
-    valance.position.set(1.96, 0.455, 0);
+    valance.position.set(1.96, 0.375, 0);
     g.add(valance);
     // 扩散器竖条
     for (let k = -2; k <= 2; k++) {
       const fin = new THREE.Mesh(new THREE.BoxGeometry(0.40, 0.10, 0.035), darkTrim);
-      fin.position.set(2.00, 0.437, k * 0.22);
+      fin.position.set(2.00, 0.355, k * 0.22);
       g.add(fin);
     }
   }
@@ -1250,14 +1267,14 @@ function buildCar() {
     // 白色车身和黑色车轮分开, 车身就不再像一张盖在轮子上的白毯子。
     // 高度必须高于 magContact(0.385), 否则会插进坡道。
     {
-      const sy = bodyYBotAt(0.05) + 0.070;
+      const sy = bodyYBotAt(0.05) + 0.055;
       const skirt = new THREE.Mesh(new THREE.BoxGeometry(2.16, 0.105, 0.060), darkTrim);
       skirt.position.set(0.05, sy, sgn * (bodySurfaceZ(0.05, sy) + 0.004));
       g.add(skirt);
     }
     // 前翼子板上的侧向进气
     const intake = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.10, 0.05), darkTrim);
-    intake.position.set(-1.12, 0.560, sgn * (bodySurfaceZ(-1.12, 0.560) - 0.010));
+    intake.position.set(-1.12, 0.520, sgn * (bodySurfaceZ(-1.12, 0.520) - 0.010));
     intake.rotation.z = -0.10;
     g.add(intake);
     // 后视镜
@@ -1271,8 +1288,10 @@ function buildCar() {
     // 否则轮眉会陷进车身, 看起来像浮在轮子上的一圈黑环。
     // 轮眉: 落在胎面外缘外侧一点点 —— 刚好在翼子板鼓出的边缘,
     // 既不会浮在空中, 也不会被轮胎完全埋掉看不见。
-    g.add(buildWheelArch(-1.30, sgn * (bodySurfaceZ(-1.30, 0.60) - 0.004), 0.330, 0.22, darkTrim));
-    g.add(buildWheelArch(1.38, sgn * (bodySurfaceZ(1.38, 0.60) - 0.004), 0.330, 0.22, darkTrim));
+    // 轮眉半径 0.330 -> 0.385: 中心下移到 0.230 后, 拱顶仍在 0.615 > 轮胎顶 0.600,
+    // 车身底板下探到 0.218 后轮眉才能继续露在车壳外当"轮眉"用
+    g.add(buildWheelArch(-1.30, sgn * (bodySurfaceZ(-1.30, 0.60) - 0.004), 0.385, 0.22, darkTrim));
+    g.add(buildWheelArch(1.38, sgn * (bodySurfaceZ(1.38, 0.60) - 0.004), 0.385, 0.22, darkTrim));
   }
 
   // ---- 车轮：Roadster 大轮毂 + 细辐条 ----
@@ -1313,26 +1332,26 @@ function buildCar() {
   // ---- 车底：扩散器 / 喷口 / 磁吸盘 ----
   {
     const diff = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.085, 1.10), darkTrim);
-    diff.position.set(1.28, 0.442, 0);
+    diff.position.set(1.28, 0.250, 0);
     g.add(diff);
     // 后部两个推进器喷口（可见几何：短圆筒 + 内芯）
     for (const sgn of [-1, 1]) {
       const n = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.078, 0.13, 14), chrome);
-      n.position.set(1.66, 0.410, sgn * 0.28);
+      n.position.set(1.66, 0.300, sgn * 0.28);
       g.add(n);
       const core = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.072, 0.02, 14),
         new THREE.MeshBasicMaterial({ color: 0x0a2230 }));
-      core.position.set(1.66, 0.345, sgn * 0.28);
+      core.position.set(1.66, 0.242, sgn * 0.28);
       g.add(core);
     }
     // 磁吸盘
     const magPad = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.05, 26), darkTrim);
-    magPad.position.set(0.10, 0.395, 0);
+    magPad.position.set(0.10, 0.395, 0);   // 磁吸贴合面, 必须保持 0.385 基准
     g.add(magPad);
     magRing = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.042, 8, 34),
       new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.75, toneMapped: false }));
     magRing.rotation.x = Math.PI / 2;
-    magRing.position.set(0.10, 0.372, 0);
+    magRing.position.set(0.10, 0.372, 0);   // 同上
     g.add(magRing);
     for (let k = 0; k < 3; k++) {
       const c = new THREE.Mesh(new THREE.TorusGeometry(0.28 + k * 0.20, 0.015, 6, 26),
@@ -2002,12 +2021,24 @@ function frame(now) {
   // 跟车补光：从【相机侧】打过来，保证任何姿态下车身都有可读细节。
   // 不能用车体 up 方向定位光源 —— 倒挂时 up 朝下会把灯放到车下方，
   // 照到的还是被坡道遮住的车底。
+  // 位置: 相机侧、略低于车腰 —— 从上方打只会重复 key 灯的效果(顶盖死白),
+  // 压到腰线以下才能把车身下半部的侧壁照出来, 形成上亮下暗的立体过渡。
   carFill.position.set(
     camera.position.x + (car.position.x - camera.position.x) * 0.2,
-    camera.position.y + (car.position.y - camera.position.y) * 0.2 + 2.5,
+    car.position.y - 0.85,
     camera.position.z + (car.position.z - camera.position.z) * 0.2
   );
   carFill.target.position.copy(car.position);
+
+  // 侧向塑形光: 跟随车身的【横向轴】, 放在相机同侧、略高于腰线。
+  // 车身局部 +Z 是宽度方向, 用车的世界四元数把它转到世界, 就能始终从侧面打。
+  {
+    const carRight = new THREE.Vector3(0, 0, 1).applyQuaternion(car.quaternion);
+    sideShape.position.copy(car.position)
+      .addScaledVector(carRight, 6.0)
+      .add(new THREE.Vector3(0, 0.60, 0));
+    sideShape.target.position.copy(car.position);
+  }
 
   // 磁吸环发光
   const magOn = s.mag ? 1 : 0;
