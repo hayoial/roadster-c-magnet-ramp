@@ -1216,6 +1216,51 @@ function buildBPillar() {
 }
 
 /**
+ * 【四个座椅】—— Roadster 2 是 2+2 四座布局。
+ *
+ * 空间约束(为什么座椅这么矮):
+ *   座舱井口 y=0.845, 井底 y=0.625 —— 只有 0.22m 净空,
+ *   而真实比例座椅(坐垫+靠背)约 0.62m 高, 塞不下。
+ *   => 座椅【做矮】: 只做坐垫下半 + 靠背 + 头枕,
+ *      从车顶往下看只露出头枕和靠背顶部 —— 正是真实车从外面看座舱的样子。
+ *
+ * 布局:
+ *   前排 x=-0.34 (靠背在后侧 x≈-0.16), 与 B 柱(0.028~0.172) 留 0.19 间隙
+ *   后排 x=+0.38 (靠背在后侧 x≈+0.55), 与玻璃后沿 0.78 留 0.23 -> 后方是行李厢
+ */
+function buildSeat(x, z, isRear, mats) {
+  const { seatMat, seatBackMat, headrestMat } = mats;
+  const g = new THREE.Group();
+  const cushionW = 0.40, cushionL = isRear ? 0.32 : 0.38;
+  // 靠背高度受限于"不能顶穿天幕":
+  //   玻璃面 = 车顶yTop - GLASS_SINK + GLASS_RISE ≈ 1.110-0.088+0.030 = 1.052
+  //   靠背顶必须低于此值, 留 0.05 余量 -> 靠背顶 ≤ 1.00
+  const backH = 0.22, backT = 0.09;
+  const floorY = 0.585;                  // 座舱地板面
+  const seatTop = floorY + 0.10;        // 坐垫顶面 = 0.685
+
+  // 坐垫
+  const cushion = new THREE.Mesh(new THREE.BoxGeometry(cushionL, 0.10, cushionW), seatMat);
+  cushion.position.set(0, seatTop - 0.05, 0);
+  g.add(cushion);
+
+  // 靠背(后倾 15° —— 座椅的"斜"是刚性读感的关键)
+  const back = new THREE.Mesh(new THREE.BoxGeometry(backT, backH, cushionW), seatBackMat);
+  back.position.set(cushionL * 0.44 + 0.02, seatTop + backH * 0.5 - 0.015, 0);
+  back.rotation.z = -0.26;
+  g.add(back);
+
+  // 头枕 —— 座椅最强的识别特征, 略亮
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.075, 0.22), headrestMat);
+  head.position.set(cushionL * 0.44 + 0.02 + 0.045, seatTop + backH - 0.028, 0);
+  head.rotation.z = -0.26;
+  g.add(head);
+
+  g.position.set(x, 0, z);
+  return g;
+}
+
+/**
  * 车顶玻璃的【实体裙边 / 密封框】—— 沿玻璃左右边缘向下的窄带。
  * 侧视时能看到玻璃有厚度, 而不是一张纸片; 同时与车身形成一道暗色凹槽。
  */
@@ -1375,12 +1420,31 @@ function buildCar() {
   // opacity 保持 1.0(完全不透明): 真实全景天幕从外面看就是黑的。
   // A/B 实测: tr=0 + op=1.0 车顶变成实心深色块, 完全看不穿。
   const glass = new THREE.MeshPhysicalMaterial({
+    // 深色镀膜天幕: transmission 必须为 0(物理透射会绕过 opacity)。
+    // opacity = 1.0 完全不透明(符合"最多25%透明"的要求)。
+    // A/B 实测: op=1.0 时座舱里四个座椅的剪影最清晰;
+    // 降到 0.82 以下玻璃反射反而盖住座椅, 读感更差。
     color: 0x0a1017, roughness: 0.08, metalness: 0.55,
     transmission: 0.0, thickness: 0.20, transparent: false, opacity: 1.0,
     ior: 1.5, envMapIntensity: 1.05,
   });
   const darkTrim = new THREE.MeshStandardMaterial({
     color: 0x0b0e13, roughness: 0.40, metalness: 0.75, envMapIntensity: 1.1,
+  });
+  // 座舱内衬: 比 darkTrim 更暗更哑光 —— 井壁是"背景", 不能抢玻璃和座椅的戏
+  const cabinTrim = new THREE.MeshStandardMaterial({
+    color: 0x070a0f, roughness: 0.92, metalness: 0.04, envMapIntensity: 0.35,
+  });
+  // 【座椅】皮革质感, 哑光深色 —— 透过天幕若隐若现, 不能太亮
+  const seatMat = new THREE.MeshStandardMaterial({
+    color: 0x1c232c, roughness: 0.88, metalness: 0.06, envMapIntensity: 0.45,
+  });
+  const seatBackMat = new THREE.MeshStandardMaterial({
+    color: 0x252e39, roughness: 0.82, metalness: 0.08, envMapIntensity: 0.55,
+  });
+  // 头枕(带一点对比, 是"座椅"最强的识别特征)
+  const headrestMat = new THREE.MeshStandardMaterial({
+    color: 0x3a4553, roughness: 0.78, metalness: 0.10, envMapIntensity: 0.70,
   });
   const chrome = new THREE.MeshStandardMaterial({
     color: 0x9aa6b4, roughness: 0.18, metalness: 0.96, envMapIntensity: 1.8,
@@ -1426,22 +1490,38 @@ function buildCar() {
     //   - 井壁: 沿开口四周向下的垂直壁
     // 有壁才有"深"的读感, 单纯一块板仍会看到底盘。
     // 两块风挡各配一块内衬, 中间给 B 柱让位(否则 B 柱会被内衬遮住)
-    const wz = 0.98, depth = 0.30, wallY = 0.845;
-    for (const [cx, cw] of [[-0.26, 0.66], [0.50, 0.52]]) {
-      const floor = new THREE.Mesh(new THREE.BoxGeometry(cw, 0.02, wz), darkTrim);
-      floor.position.set(cx, wallY - depth + 0.04, 0);
-      g.add(floor);
-    }
-    // 四面井壁(同样分两块, 中间留 B 柱位置)
-    for (const [cx, cw] of [[-0.26, 0.66], [0.50, 0.52]]) {
-      for (const [sx, sz, w, d] of [[0, wz/2, cw, 0.02], [0, -wz/2, cw, 0.02],
-                                    [cw/2, 0, 0.02, wz], [-cw/2, 0, 0.02, wz]]) {
-        const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), darkTrim);
-        wall.position.set(cx + sx, wallY - depth/2, sz);
-        g.add(wall);
-      }
+    // 井壁压矮(0.30 -> 0.16)并内收(wz 0.98 -> 0.90):
+    // 太高太宽的井壁会变成两个"货箱", 抢掉玻璃和座椅的视觉重心。
+    // 井壁只留 0.05 高的贴地矮边: 立面墙会把座椅完全遮住,
+    // 而"挡住底盘"的职责由不透明地板板承担就够了。
+    // 井底(=座舱地板)在 y=0.585, 座椅站在它上面。
+    // 井壁只留 0.06 高的贴地矮边(舱沿), 立面墙会把座椅完全遮住。
+    // wz/2 = 0.51 必须 > 磁吸环外径 0.476, 否则青色环会从地板边缘露出来
+    const wz = 1.10, depth = 0.06, wallY = 0.845, floorY = 0.585;
+    // 【座舱地板】一整块, 不分两半。
+    //   分成两块会在中间 x=0.10 留缺口 —— 那正好是磁吸盘的位置,
+    //   磁吸环会从缝里露出来(青色圈穿帮)。
+    //   连续一块就彻底挡住底盘, 同时给四个座椅当立足面。
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.05, wz), darkTrim);
+    floor.position.set(0.08, floorY - 0.025, 0);
+    g.add(floor);
+    // 四面舱沿矮边(只贴地 0.06, 提供一点"围起来"的读感)
+    for (const [sx, sz, w, d] of [[0, wz/2, 1.44, 0.02], [0, -wz/2, 1.44, 0.02],
+                                  [0.72, 0, 0.02, wz], [-0.64, 0, 0.02, wz]]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), cabinTrim);
+      wall.position.set(0.08 + sx, floorY + depth/2, sz);
+      g.add(wall);
     }
   }
+
+  // ---- 【四个座椅】2+2 布局, 透过天幕若隐若现 ----
+  for (const [sx, sz, isRear] of [
+    [-0.42,  0.235, false], [-0.42, -0.235, false],
+    [ 0.38,  0.215, true ], [ 0.38, -0.215, true ],
+  ]) {
+    g.add(buildSeat(sx, sz, isRear, { seatMat, seatBackMat, headrestMat }));
+  }
+
 
   // A 柱 / 车身与玻璃之间的密封条
   {
